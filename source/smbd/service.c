@@ -249,7 +249,14 @@ int add_home_service(const char *service, const char *username, const char *home
 	if (!lp_add_home(service, iHomeService, username, homedir)) {
 		return -1;
 	}
-	
+	/*
+	 * If the user is part of the admin group then the shae
+	 * list should include all local volumes.
+	 */
+	if ((lp_parm_bool(iHomeService, "com.apple", "show admin all volumes", False)) &&
+		(user_in_group(username, "admin")))
+	   apple_clone_local_volumes(iHomeService, username);
+
 	return lp_servicenumber(service);
 
 }
@@ -268,6 +275,15 @@ int find_service(fstring service)
 	all_string_sub(service,"\\","/",0);
 
 	iService = lp_servicenumber(service);
+
+	/* Is it a usershare service ? Usershares are statically configured
+	 * services, so they get priority over any implicitly created services.
+	 */
+	if (iService < 0 && *lp_usershare_path()) {
+		/* Ensure the name is canonicalized. */
+		strlower_m(service);
+		iService = load_usershare_service(service);
+	}
 
 	/* now handle the special case of a home directory */
 	if (iService < 0) {
@@ -310,13 +326,6 @@ int find_service(fstring service)
 
 	/* Check for default vfs service?  Unsure whether to implement this */
 	if (iService < 0) {
-	}
-
-	/* Is it a usershare service ? */
-	if (iService < 0 && *lp_usershare_path()) {
-		/* Ensure the name is canonicalized. */
-		strlower_m(service);
-		iService = load_usershare_service(service);
 	}
 
 	/* just possibly it's a default service? */
@@ -531,6 +540,19 @@ static NTSTATUS find_forced_group(BOOL force_user,
 	return result;
 }
 
+static BOOL vuser_is_trust_account(const user_struct *vuser)
+{
+	const char *pos;
+
+	/* Trust account names end in '$'. */
+	pos = strrchr(vuser->user.smb_name, '$');
+	if (pos && *(pos + 1) == '\0') {
+		return True;
+	}
+
+	return False;
+}
+
 /****************************************************************************
   Make a connection, given the snum to connect to, and the vuser of the
   connecting user if appropriate.
@@ -672,6 +694,23 @@ static connection_struct *make_connection_snum(int snum, user_struct *vuser,
 	conn->ipc = ( (strncmp(dev,"IPC",3) == 0) ||
 		      ( lp_enable_asu_support() && strequal(dev,"ADMIN$")) );
 	conn->dirptr = NULL;
+
+	/* Trust accounts should not be poking around in disk or print shares.
+	 * This is a little bit of paranoia and works around the fact that the
+	 * Apple pam_sacl module cannot exclude trust accounts.
+	 *
+	 * This is only parameterised on "com.apple:trustacct disk access" for
+	 * Leoaprd becuse I'm paranoid.
+	 */
+	if (!IS_IPC(conn) &&
+	    !lp_parm_bool(snum, "com.apple", "trustacct disk access", False) &&
+	    vuser_is_trust_account(vuser)) {
+		DEBUG(0, ("trust account '%s' denied access to non-IPC share %s\n",
+			vuser->user.smb_name, lp_servicename(SNUM(conn))));
+		conn_free(conn);
+		*status = NT_STATUS_ACCESS_DENIED;
+		return NULL;
+	}
 
 	/* Case options for the share. */
 	if (lp_casesensitive(snum) == Auto) {
@@ -1023,6 +1062,21 @@ static connection_struct *make_connection_snum(int snum, user_struct *vuser,
 		vfs_ChDir(conn,conn->connectpath);
 	}
 #endif
+
+	/* Figure out the characteristics of the underlying filesystem. This
+	 * assumes that all the filesystem mounted withing a share path have
+	 * the same characteristics, which is likely but not guaranteed.
+	 */
+	{
+		vfs_statvfs_struct svfs;
+
+		conn->fs_capabilities =
+		    FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
+
+		if (SMB_VFS_STATVFS(conn, conn->connectpath, &svfs) == 0) {
+			conn->fs_capabilities = svfs.FsCapabilities;
+		}
+	}
 	
 	/*
 	 * Print out the 'connected as' stuff here as we need

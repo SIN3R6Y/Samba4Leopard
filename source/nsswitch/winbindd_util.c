@@ -36,7 +36,6 @@ extern struct winbindd_methods passdb_methods;
  * Winbind daemon for NT domain authentication nss module.
  **/
 
-
 /* The list of trusted domains.  Note that the list can be deleted and
    recreated using the init_domain_list() function so pointers to
    individual winbindd_domain structures cannot be made.  Keep a copy of
@@ -83,6 +82,9 @@ static BOOL is_internal_domain(const DOM_SID *sid)
 	if (sid == NULL)
 		return False;
 
+	if ( IS_DC )
+		return sid_check_is_builtin(sid);
+
 	return (sid_check_is_domain(sid) || sid_check_is_builtin(sid));
 }
 
@@ -90,6 +92,9 @@ static BOOL is_in_internal_domain(const DOM_SID *sid)
 {
 	if (sid == NULL)
 		return False;
+
+	if ( IS_DC )
+		return sid_check_is_in_builtin(sid);
 
 	return (sid_check_is_in_our_domain(sid) || sid_check_is_in_builtin(sid));
 }
@@ -105,7 +110,7 @@ static struct winbindd_domain *add_trusted_domain(const char *domain_name, const
 	
 	/* ignore alt_name if we are not in an AD domain */
 	
-	if ( (lp_security() == SEC_ADS) && alt_name && *alt_name) {
+	if ( alt_name && *alt_name) {
 		alternative_name = alt_name;
 	}
         
@@ -522,7 +527,7 @@ BOOL init_domain_list(void)
 
 	/* Local SAM */
 
-	domain = add_trusted_domain(get_global_sam_name(), NULL,
+	domain = add_trusted_domain(get_global_sam_name(), lp_realm(),
 				    &passdb_methods, get_global_sam_sid());
 	if ( role != ROLE_DOMAIN_MEMBER ) {
 		domain->primary = True;
@@ -589,12 +594,18 @@ struct winbindd_domain *find_domain_from_name(const char *domain_name)
 struct winbindd_domain *find_domain_from_sid_noinit(const DOM_SID *sid)
 {
 	struct winbindd_domain *domain;
+	uint32_t discard;
 
 	/* Search through list */
 
 	for (domain = domain_list(); domain != NULL; domain = domain->next) {
-		if (sid_compare_domain(sid, &domain->sid) == 0)
+		/* We need to use sid_peek_check_rid, because some systems, eg
+		 * Open Directory, have allocated their own builtin SIDs.
+		 * These need to get to the default idmap backend.
+		 */
+		if (sid_peek_check_rid(&domain->sid, sid, &discard) == 0) {
 			return domain;
+		}
 	}
 
 	/* Not found */
@@ -905,53 +916,6 @@ void fill_domain_username(fstring name, const char *domain, const char *user, BO
 char *get_winbind_priv_pipe_dir(void) 
 {
 	return lock_path(WINBINDD_PRIV_SOCKET_SUBDIR);
-}
-
-/* Open the winbindd socket */
-
-static int _winbindd_socket = -1;
-static int _winbindd_priv_socket = -1;
-
-int open_winbindd_socket(void)
-{
-	if (_winbindd_socket == -1) {
-		_winbindd_socket = create_pipe_sock(
-			WINBINDD_SOCKET_DIR, WINBINDD_SOCKET_NAME, 0755);
-		DEBUG(10, ("open_winbindd_socket: opened socket fd %d\n",
-			   _winbindd_socket));
-	}
-
-	return _winbindd_socket;
-}
-
-int open_winbindd_priv_socket(void)
-{
-	if (_winbindd_priv_socket == -1) {
-		_winbindd_priv_socket = create_pipe_sock(
-			get_winbind_priv_pipe_dir(), WINBINDD_SOCKET_NAME, 0750);
-		DEBUG(10, ("open_winbindd_priv_socket: opened socket fd %d\n",
-			   _winbindd_priv_socket));
-	}
-
-	return _winbindd_priv_socket;
-}
-
-/* Close the winbindd socket */
-
-void close_winbindd_socket(void)
-{
-	if (_winbindd_socket != -1) {
-		DEBUG(10, ("close_winbindd_socket: closing socket fd %d\n",
-			   _winbindd_socket));
-		close(_winbindd_socket);
-		_winbindd_socket = -1;
-	}
-	if (_winbindd_priv_socket != -1) {
-		DEBUG(10, ("close_winbindd_socket: closing socket fd %d\n",
-			   _winbindd_priv_socket));
-		close(_winbindd_priv_socket);
-		_winbindd_priv_socket = -1;
-	}
 }
 
 /*

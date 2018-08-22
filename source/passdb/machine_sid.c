@@ -206,7 +206,11 @@ void reset_global_sam_sid(void)
 
 BOOL sid_check_is_domain(const DOM_SID *sid)
 {
-	return sid_equal(sid, get_global_sam_sid());
+	DOM_SID apple_wellknown =
+	    { 1, 1, {0,0,0,0,0,5}, {21,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
+	return sid_equal(sid, get_global_sam_sid()) ||
+		sid_equal(sid, &apple_wellknown);
 }
 
 /*****************************************************************
@@ -221,5 +225,5 @@ BOOL sid_check_is_in_our_domain(const DOM_SID *sid)
 	sid_copy(&dom_sid, sid);
 	sid_split_rid(&dom_sid, &rid);
 	
-	return sid_equal(&dom_sid, get_global_sam_sid());
+	return sid_check_is_domain(&dom_sid);
 }

@@ -521,7 +521,8 @@ static BOOL receive_message_or_smb(char *buffer, int buffer_len, int timeout)
 		goto again;
 	}
 
-	return receive_smb(smbd_server_fd(), buffer, 0);
+	return receive_smb(smbd_server_fd(), buffer,
+			BUFFER_SIZE + LARGE_WRITEX_HDR_SIZE, 0);
 }
 
 /*
@@ -999,8 +1000,16 @@ static int switch_message(int type,char *inbuf,char *outbuf,int size,int bufsize
 			return(ERROR_DOS(ERRSRV,ERRaccess));
 		}
 
+		INC_OP_COUNT(SNUM(conn));
+		INC_BYTE_COUNT(SNUM(conn), size);
+
 		current_inbuf = inbuf; /* In case we need to defer this message in open... */
 		outsize = smb_messages[type].fn(conn, inbuf,outbuf,size,bufsize);
+
+		/* Handling the message can deallocate conn, eg. SMBtdis. */
+		if (conn && conn->params) {
+		    INC_BYTE_COUNT(SNUM(conn), outsize);
+		}
 	}
 
 	smb_dump(smb_fn_name(type), 0, outbuf, outsize);

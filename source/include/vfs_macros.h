@@ -65,9 +65,12 @@
 #define SMB_VFS_FCHMOD(fsp, fd, mode) ((fsp)->conn->vfs.ops.fchmod((fsp)->conn->vfs.handles.fchmod, (fsp), (fd), (mode)))
 #define SMB_VFS_CHOWN(conn, path, uid, gid) ((conn)->vfs.ops.chown((conn)->vfs.handles.chown, (path), (uid), (gid)))
 #define SMB_VFS_FCHOWN(fsp, fd, uid, gid) ((fsp)->conn->vfs.ops.fchown((fsp)->conn->vfs.handles.fchown, (fsp), (fd), (uid), (gid)))
+#define SMB_VFS_LCHOWN(conn, path, uid, gid) ((conn)->vfs.ops.lchown((conn)->vfs.handles.lchown, (path), (uid), (gid)))
 #define SMB_VFS_CHDIR(conn, path) ((conn)->vfs.ops.chdir((conn)->vfs.handles.chdir, (path)))
 #define SMB_VFS_GETWD(conn, buf) ((conn)->vfs.ops.getwd((conn)->vfs.handles.getwd, (buf)))
 #define SMB_VFS_NTIMES(conn, path, ts) ((conn)->vfs.ops.ntimes((conn)->vfs.handles.ntimes, (path), (ts)))
+#define SMB_VFS_SET_CREATE_TIME(conn, path, createtime) ((conn)->vfs.ops.set_create_time((conn)->vfs.handles.set_create_time, (path), (createtime)))
+#define SMB_VFS_GET_PRESERVED_NAME(conn, path, name) ((conn)->vfs.ops.get_preserved_name((conn)->vfs.handles.get_preserved_name, (path), (name)))
 #define SMB_VFS_FTRUNCATE(fsp, fd, offset) ((fsp)->conn->vfs.ops.ftruncate((fsp)->conn->vfs.handles.ftruncate, (fsp), (fd), (offset)))
 #define SMB_VFS_LOCK(fsp, fd, op, offset, count, type) ((fsp)->conn->vfs.ops.lock((fsp)->conn->vfs.handles.lock, (fsp), (fd) ,(op), (offset), (count), (type)))
 #define SMB_VFS_KERNEL_FLOCK(fsp, fd, share_mode) ((fsp)->conn->vfs.ops.kernel_flock((fsp)->conn->vfs.handles.kernel_flock, (fsp), (fd), (share_mode)))
@@ -80,6 +83,7 @@
 #define SMB_VFS_REALPATH(conn, path, resolved_path) ((conn)->vfs.ops.realpath((conn)->vfs.handles.realpath, (path), (resolved_path)))
 #define SMB_VFS_NOTIFY_WATCH(conn, ctx, e, callback, private_data, handle_p) ((conn)->vfs.ops.notify_watch((conn)->vfs.handles.notify_watch, (ctx), (e), (callback), (private_data), (handle_p)))
 #define SMB_VFS_CHFLAGS(conn, path, flags) ((conn)->vfs.ops.chflags((conn)->vfs.handles.chflags, (path), (flags)))
+#define SMB_VFS_STREAMINFO(conn, fsp, fname, names, sizes) ((conn)->vfs.ops.streaminfo((conn)->vfs.handles.streaminfo, (fsp), (fname), (names), (sizes)))
 
 /* NT ACL operations. */
 #define SMB_VFS_FGET_NT_ACL(fsp, fd, security_info, ppdesc) ((fsp)->conn->vfs.ops.fget_nt_acl((fsp)->conn->vfs.handles.fget_nt_acl, (fsp), (fd), (security_info), (ppdesc)))
@@ -181,9 +185,12 @@
 #define SMB_VFS_OPAQUE_FCHMOD(fsp, fd, mode) ((fsp)->conn->vfs_opaque.ops.fchmod((fsp)->conn->vfs_opaque.handles.fchmod, (fsp), (fd), (mode)))
 #define SMB_VFS_OPAQUE_CHOWN(conn, path, uid, gid) ((conn)->vfs_opaque.ops.chown((conn)->vfs_opaque.handles.chown, (path), (uid), (gid)))
 #define SMB_VFS_OPAQUE_FCHOWN(fsp, fd, uid, gid) ((fsp)->conn->vfs_opaque.ops.fchown((fsp)->conn->vfs_opaque.handles.fchown, (fsp), (fd), (uid), (gid)))
+#define SMB_VFS_OPAQUE_LCHOWN(conn, path, uid, gid) ((conn)->vfs_opaque.ops.lchown((conn)->vfs_opaque.handles.lchown, (path), (uid), (gid)))
 #define SMB_VFS_OPAQUE_CHDIR(conn, path) ((conn)->vfs_opaque.ops.chdir((conn)->vfs_opaque.handles.chdir, (path)))
 #define SMB_VFS_OPAQUE_GETWD(conn, buf) ((conn)->vfs_opaque.ops.getwd((conn)->vfs_opaque.handles.getwd, (buf)))
 #define SMB_VFS_OPAQUE_NTIMES(conn, path, ts) ((conn)->vfs_opaque.ops.ntimes((conn)->vfs_opaque.handles.ntimes, (path), (ts)))
+#define SMB_VFS_OPAQUE_SET_CREATE_TIME(conn, path, createtime) ((conn)->vfs_opaque.ops.set_create_time((conn)->vfs_opaque.handles.set_create_time, (path), (createtime)))
+#define SMB_VFS_OPAQUE_GET_PRESERVED_NAME(conn, path, name) ((conn)->vfs_opaque.ops.get_preserved_name((conn)->vfs_opaque.handles.get_preserved_name, (path), (name)))
 #define SMB_VFS_OPAQUE_FTRUNCATE(fsp, fd, offset) ((fsp)->conn->vfs_opaque.ops.ftruncate((fsp)->conn->vfs_opaque.handles.ftruncate, (fsp), (fd), (offset)))
 #define SMB_VFS_OPAQUE_LOCK(fsp, fd, op, offset, count, type) ((fsp)->conn->vfs_opaque.ops.lock((fsp)->conn->vfs_opaque.handles.lock, (fsp), (fd) ,(op), (offset), (count), (type)))
 #define SMB_VFS_OPAQUE_FLOCK(fsp, fd, share_mode) ((fsp)->conn->vfs_opaque.ops.lock((fsp)->conn->vfs_opaque.handles.kernel_flock, (fsp), (fd), (share_mode)))
@@ -196,6 +203,7 @@
 #define SMB_VFS_OPAQUE_REALPATH(conn, path, resolved_path) ((conn)->vfs_opaque.ops.realpath((conn)->vfs_opaque.handles.realpath, (path), (resolved_path)))
 #define SMB_VFS_OPAQUE_NOTIFY_WATCH(conn, ctx, e, callback, private_data, handle_p) ((conn)->vfs_opaque.ops.notify_watch((conn)->vfs_opaque.handles.notify_watch, (ctx), (e), (callback), (private_data), (handle_p)))
 #define SMB_VFS_OPAQUE_CHFLAGS(conn, path, flags) ((conn)->vfs_opaque.ops.chflags((conn)->vfs_opaque.handles.chflags, (path), (flags)))
+#define SMB_VFS_OPAQUE_STREAMINFO(conn, fsp, fname, names, sizes) ((conn)->vfs_opaque.ops.streaminfo((conn)->vfs_opaque.handles.streaminfo, (fsp), (fname), (names), (sizes)))
 
 /* NT ACL operations. */
 #define SMB_VFS_OPAQUE_FGET_NT_ACL(fsp, fd, security_info, ppdesc) ((fsp)->conn->vfs_opaque.ops.fget_nt_acl((fsp)->conn->vfs_opaque.handles.fget_nt_acl, (fsp), (fd), (security_info), (ppdesc)))
@@ -298,9 +306,12 @@
 #define SMB_VFS_NEXT_FCHMOD(handle, fsp, fd, mode) ((handle)->vfs_next.ops.fchmod((handle)->vfs_next.handles.fchmod, (fsp), (fd), (mode)))
 #define SMB_VFS_NEXT_CHOWN(handle, path, uid, gid) ((handle)->vfs_next.ops.chown((handle)->vfs_next.handles.chown, (path), (uid), (gid)))
 #define SMB_VFS_NEXT_FCHOWN(handle, fsp, fd, uid, gid) ((handle)->vfs_next.ops.fchown((handle)->vfs_next.handles.fchown, (fsp), (fd), (uid), (gid)))
+#define SMB_VFS_NEXT_LCHOWN(handle, path, uid, gid) ((handle)->vfs_next.ops.lchown((handle)->vfs_next.handles.lchown, (path), (uid), (gid)))
 #define SMB_VFS_NEXT_CHDIR(handle, path) ((handle)->vfs_next.ops.chdir((handle)->vfs_next.handles.chdir, (path)))
 #define SMB_VFS_NEXT_GETWD(handle, buf) ((handle)->vfs_next.ops.getwd((handle)->vfs_next.handles.getwd, (buf)))
 #define SMB_VFS_NEXT_NTIMES(handle, path, ts) ((handle)->vfs_next.ops.ntimes((handle)->vfs_next.handles.ntimes, (path), (ts)))
+#define SMB_VFS_NEXT_SET_CREATE_TIME(conn, path, createtime) ((conn)->vfs_next.ops.set_create_time((conn)->vfs_next.handles.set_create_time, (path), (createtime)))
+#define SMB_VFS_NEXT_GET_PRESERVED_NAME(conn, path, name) ((conn)->vfs_next.ops.get_preserved_name((conn)->vfs_next.handles.get_preserved_name, (path), (name)))
 #define SMB_VFS_NEXT_FTRUNCATE(handle, fsp, fd, offset) ((handle)->vfs_next.ops.ftruncate((handle)->vfs_next.handles.ftruncate, (fsp), (fd), (offset)))
 #define SMB_VFS_NEXT_LOCK(handle, fsp, fd, op, offset, count, type) ((handle)->vfs_next.ops.lock((handle)->vfs_next.handles.lock, (fsp), (fd) ,(op), (offset), (count), (type)))
 #define SMB_VFS_NEXT_KERNEL_FLOCK(handle, fsp, fd, share_mode)((handle)->vfs_next.ops.kernel_flock((handle)->vfs_next.handles.kernel_flock, (fsp), (fd), (share_mode)))
@@ -313,6 +324,7 @@
 #define SMB_VFS_NEXT_REALPATH(handle, path, resolved_path) ((handle)->vfs_next.ops.realpath((handle)->vfs_next.handles.realpath, (path), (resolved_path)))
 #define SMB_VFS_NEXT_NOTIFY_WATCH(conn, ctx, e, callback, private_data, handle_p) ((conn)->vfs_next.ops.notify_watch((conn)->vfs_next.handles.notify_watch, (ctx), (e), (callback), (private_data), (handle_p)))
 #define SMB_VFS_NEXT_CHFLAGS(handle, path, flags) ((handle)->vfs_next.ops.chflags((handle)->vfs_next.handles.chflags, (path), (flags)))
+#define SMB_VFS_NEXT_STREAMINFO(handle, fsp, fname, names, sizes) ((handle)->vfs.ops.streaminfo((handle)->vfs.handles.streaminfo, (fsp), (fname), (names), (sizes)))
 
 /* NT ACL operations. */
 #define SMB_VFS_NEXT_FGET_NT_ACL(handle, fsp, fd, security_info, ppdesc) ((handle)->vfs_next.ops.fget_nt_acl((handle)->vfs_next.handles.fget_nt_acl, (fsp), (fd), (security_info), (ppdesc)))

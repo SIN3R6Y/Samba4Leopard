@@ -114,8 +114,18 @@ static int count_fn( TDB_CONTEXT *the_tdb, TDB_DATA kbuf, TDB_DATA dbuf, void *u
 		return 0;
 	}
 
-	if (strequal(crec.servicename, cs->name))
+	if (cs->name) {
+		/* We are counting all the connections to a given share. */
+		if (strequal(crec.servicename, cs->name)) {
+			cs->curr_connections++;
+		}
+	} else {
+		/* We are counting all the connections. Static registrations
+		 * like the lpq backgroud process and the smbd daemon process
+		 * have a cnum of -1, so won't be counted here.
+		 */
 		cs->curr_connections++;
+	}
 
 	return 0;
 }
@@ -145,6 +155,15 @@ int count_current_connections( const char *sharename, BOOL clear  )
 	}
 	
 	return cs.curr_connections;
+}
+
+/****************************************************************************
+ Count the number of connections open across all shares.
+****************************************************************************/
+
+int count_all_current_connections(void)
+{
+	return count_current_connections(NULL, True /* clear stale entries */);
 }
 
 /****************************************************************************

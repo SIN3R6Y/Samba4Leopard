@@ -22,11 +22,33 @@
 
 extern struct current_user current_user;
 
-static FAKE_FILE fake_files[] = {
-#ifdef WITH_QUOTAS
-	{FAKE_FILE_NAME_QUOTA_UNIX,	FAKE_FILE_TYPE_QUOTA,	init_quota_handle,	destroy_quota_handle},
-#endif /* WITH_QUOTAS */
-	{NULL,				FAKE_FILE_TYPE_NONE,	NULL,			NULL }
+typedef struct _FAKE_FILE {
+	const char *name;
+	const char **streams;
+	enum FAKE_FILE_TYPE type;
+	void *(*init_pd)(TALLOC_CTX *men_ctx);
+	void (*free_pd)(void **pd);
+} FAKE_FILE;
+
+#ifdef WITH_SYS_QUOTAS
+static const char * fake_quota_streams = {
+	":$Q:$INDEX_ALLOCATION",
+	NULL
+};
+#endif /* WITH_SYS_QUOTAS */
+
+static const FAKE_FILE fake_files[] = {
+#ifdef WITH_SYS_QUOTAS
+	{
+	    FAKE_FILE_NAME_QUOTA_UNIX,
+	    fake_quota_streams,
+	    FAKE_FILE_TYPE_QUOTA,
+	    init_quota_handle,
+	    destroy_quota_handle
+	},
+#endif /* WITH_SYS_QUOTAS */
+
+	{NULL,	NULL, FAKE_FILE_TYPE_NONE, NULL, NULL }
 };
 
 /****************************************************************************
@@ -74,24 +96,43 @@ static struct _FAKE_FILE_HANDLE *init_fake_file_handle(enum FAKE_FILE_TYPE type)
  Does this name match a fake filename ?
 ****************************************************************************/
 
-enum FAKE_FILE_TYPE is_fake_file(const char *fname)
+static BOOL match_stream_name(const FAKE_FILE * fake_file, const char *stream)
 {
-#ifdef HAVE_SYS_QUOTAS
+	if (!stream) {
+		return True;
+	}
+
+	if (fake_file->streams) {
+		const char ** s;
+
+		for (s = fake_files->streams; *s; ++s) {
+			if (strcmp(stream, *s) == 0) {
+				return True;
+			}
+		}
+	}
+
+	return False;
+}
+
+enum FAKE_FILE_TYPE is_fake_file(const char *fname, const char *stream)
+{
 	int i;
-#endif
 
 	if (!fname) {
 		return FAKE_FILE_TYPE_NONE;
 	}
 
-#ifdef HAVE_SYS_QUOTAS
 	for (i=0;fake_files[i].name!=NULL;i++) {
-		if (strncmp(fname,fake_files[i].name,strlen(fake_files[i].name))==0) {
+		if (strcmp(fname, fake_files[i].name) != 0) {
+			continue;
+		}
+
+		if (match_stream_name(&fake_files[i], stream)) {
 			DEBUG(5,("is_fake_file: [%s] is a fake file\n",fname));
 			return fake_files[i].type;
 		}
 	}
-#endif
 
 	return FAKE_FILE_TYPE_NONE;
 }

@@ -3,6 +3,19 @@
 VERSION_FILE=$1
 OUTPUT_FILE=$2
 
+# Disable embedding the SVN/SVK revision inthe version string. This isn't a
+# terrible idea, but I can't always run these sensibly in my build environment.
+# --jpeach
+svn()
+{
+    false
+}
+
+svk()
+{
+    false
+}
+
 if test -z "$VERSION_FILE";then
 	VERSION_FILE="VERSION"
 fi

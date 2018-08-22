@@ -1,7 +1,8 @@
 /*
- * XFS preallocation support module.
+ * File preallocation support module.
  *
  * Copyright (c) James Peach 2006
+ * Copyright (C) 2007 Apple Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,19 +28,34 @@
  * proceed without having to allocate new extents and results in better file
  * layouts on disk.
  *
- * Currently only implemented for XFS. This module is based on an original idea
- * and implementation by Sebastian Brings.
+ * Currently only implemented for XFS ans OS X.
+ *
+ * This module is based on an original idea and implementation by
+ * Sebastian Brings.
  *
  * Tunables.
  *
- *      prealloc: <ext>	    Number of bytes to preallocate for a file with
+ *      prealloc:<ext>	    Number of bytes to preallocate for a file with
  *			    the matching extension.
- *      prealloc:debug	    Debug level at which to emit messages.
+ *      prealloc:msglevel   Debug level at which to emit messages.
  *
  * Example.
  *
- *	prealloc:mpeg = 500M  # Preallocate *.mpeg to 500 MiB.
+ *	prealloc:msglevel = 10	# Emit log/debug messages at level 10
+ *	prealloc:mpeg = 500M	# Preallocate *.mpeg to 500 MiB.
  */
+
+#if defined(F_PREALLOCATE) && defined(HAVE_FSTORE_T)
+#define USE_DARWIN_PREALLOCATE
+#elif defined (HAVE_STRUCT_FLOCK64) || define(HAVE_XFS_LIBXFS_H)
+#define USE_XFS_PREALLOCATE
+#endif
+
+#define MODULE "prealloc"
+static int module_debug;
+
+
+#ifdef USE_XFS_PREALLOCATE
 
 #ifdef HAVE_XFS_LIBXFS_H
 #include <xfs/libxfs.h>
@@ -48,22 +64,8 @@
 #define lock_type struct flock64
 #endif
 
-#define MODULE "prealloc"
-static int module_debug;
-
-static int preallocate_space(int fd, SMB_OFF_T size)
+static int preallocate_xfs(int fd, lock_type * fl)
 {
-	lock_type fl = {0};
-	int err;
-
-	if (size <= 0) {
-		return 0;
-	}
-
-	fl.l_whence = SEEK_SET;
-	fl.l_start = 0;
-	fl.l_len = size;
-
 	/* IMPORTANT: We use RESVSP because we want the extents to be
 	 * allocated, but we don't want the allocation to show up in
 	 * st_size or persist after the close(2).
@@ -71,16 +73,63 @@ static int preallocate_space(int fd, SMB_OFF_T size)
 
 #if defined(XFS_IOC_RESVSP64)
 	/* On Linux this comes in via libxfs.h. */
-	err = xfsctl(NULL, fd, XFS_IOC_RESVSP64, &fl);
+	return xfsctl(NULL, fd, XFS_IOC_RESVSP64, &fl);
 #elif defined(F_RESVSP64)
 	/* On IRIX, this comes from fcntl.h. */
-	err = fcntl(fd, F_RESVSP64, &fl);
+	return fcntl(fd, F_RESVSP64, &fl);
+#else
+	errno = ENOTSUP;
+	return -1;
+#endif
+
+}
+
+#endif /* USE_XFS_PREALLOCATE */
+
+static int preallocate_space(int fd, SMB_OFF_T current, SMB_OFF_T size)
+{
+#if defined(USE_DARWIN_PREALLOCATE)
+	fstore_t fst;
+#elif defined(USE_XFS_PREALLOCATE)
+	lock_type fl = {0};
+#endif
+
+	int err;
+
+	if (size <= 0 || current >= size) {
+		return 0;
+	}
+
+#if defined(USE_DARWIN_PREALLOCATE)
+
+	/* Request best effort for contiguous space. */
+	fst.fst_flags = F_ALLOCATECONTIG;
+
+	/* Add requested allocation to current file size. */
+	fst.fst_posmode = F_PEOFPOSMODE;
+	fst.fst_offset = 0;
+
+	/* Figure out what we need to request since size the the absolute size
+	 * we want.
+	 */
+	fst.fst_length = size - current;
+	fst.fst_bytesalloc = 0;
+
+	err = fcntl(fd, F_PREALLOCATE, &fst);
+
+#elif defined(USE_XFS_PREALLOCATE)
+
+	fl.l_whence = SEEK_SET;
+	fl.l_start = 0;
+	fl.l_len = size;
+	err = preallocate_xfs(fd, &fl);
+
 #else
 	err = -1;
 	errno = ENOSYS;
 #endif
 
-	if (err) {
+	if (err && errno != ENOTSUP) {
 		DEBUG(module_debug,
 			("%s: preallocate failed on fd=%d size=%lld: %s\n",
 			MODULE, fd, (long long)size, strerror(errno)));
@@ -95,7 +144,7 @@ static int prealloc_connect(
                 const char *                user)
 {
 	    module_debug = lp_parm_int(SNUM(handle->conn),
-					MODULE, "debug", 100);
+					MODULE, "msglevel", 100);
 
 	    return SMB_VFS_NEXT_CONNECT(handle, service, user);
 }
@@ -107,7 +156,7 @@ static int prealloc_open(vfs_handle_struct* handle,
 			mode_t		    mode)
 {
 	int fd;
-	off64_t size = 0;
+	SMB_OFF_T size = 0;
 
 	const char * dot;
 	char fext[10];
@@ -167,7 +216,7 @@ static int prealloc_open(vfs_handle_struct* handle,
 			MODULE, fname, fd, (long long)size));
 
 		*psize = size;
-		if (preallocate_space(fd, *psize) < 0) {
+		if (preallocate_space(fd, 0, *psize) < 0) {
 			VFS_REMOVE_FSP_EXTENSION(handle, fsp);
 		}
 	}
@@ -191,9 +240,14 @@ static int prealloc_ftruncate(vfs_handle_struct * handle,
 	SMB_OFF_T *psize;
 	int ret = SMB_VFS_NEXT_FTRUNCATE(handle, fsp, fd, offset);
 
-	/* Maintain the allocated space even in the face of truncates. */
-	if ((psize = VFS_FETCH_FSP_EXTENSION(handle, fsp))) {
-		preallocate_space(fd, *psize);
+	/* Maintain the allocated space even in the face of truncates. If the
+	 * truncate succeeded, we know that the current file size is the size
+	 * the caller requested.
+	 */
+	if (ret == 0 ) {
+		if ((psize = VFS_FETCH_FSP_EXTENSION(handle, fsp))) {
+			preallocate_space(fd, offset, *psize);
+		}
 	}
 
 	return ret;

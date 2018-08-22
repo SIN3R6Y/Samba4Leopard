@@ -7,6 +7,8 @@
    Copyright (C) Steve French			2005
    Copyright (C) James Peach			2007
 
+   Copyright (C) 2006-2007 Apple Inc. All right reserved.
+
    Extensively modified by Andrew Tridgell, 1995
 
    This program is free software; you can redistribute it and/or modify
@@ -2274,7 +2276,7 @@ static int call_trans2qfsinfo(connection_struct *conn, char *inbuf, char *outbuf
 	const char *vname = volume_label(SNUM(conn));
 	int snum = SNUM(conn);
 	char *fstype = lp_fstype(SNUM(conn));
-	int quota_flag = 0;
+	int fs_attribute_flags = 0;
 
 	if (total_params < 2) {
 		return ERROR_NT(NT_STATUS_INVALID_PARAMETER);
@@ -2358,15 +2360,23 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)st.st_dev, (unsi
 		case SMB_QUERY_FS_ATTRIBUTE_INFO:
 		case SMB_FS_ATTRIBUTE_INFORMATION:
 
+			fs_attribute_flags =
+				FILE_CASE_SENSITIVE_SEARCH |
+				FILE_CASE_PRESERVED_NAMES;
 
 #if defined(HAVE_SYS_QUOTAS)
-			quota_flag = FILE_VOLUME_QUOTAS;
+			fs_attribute_flags |= FILE_VOLUME_QUOTAS;
 #endif
+			
+			if (lp_stream_support(SNUM(conn)) &&
+			    (conn->fs_capabilities & FILE_NAMED_STREAMS)) {
+					fs_attribute_flags |= FILE_NAMED_STREAMS;
+			}
+			if (lp_nt_acl_support(SNUM(conn)) ) {
+				fs_attribute_flags |= FILE_PERSISTENT_ACLS;
+			}
 
-			SIVAL(pdata,0,FILE_CASE_PRESERVED_NAMES|FILE_CASE_SENSITIVE_SEARCH|
-				(lp_nt_acl_support(SNUM(conn)) ? FILE_PERSISTENT_ACLS : 0)|
-			        FILE_UNICODE_ON_DISK|
-				quota_flag); /* FS ATTRIBUTES */
+			SIVAL(pdata, 0, fs_attribute_flags); /* FS ATTRIBUTES */
 
 			SIVAL(pdata,4,255); /* Max filename component length */
 			/* NOTE! the fstype must *not* be null terminated or win98 won't recognise it
@@ -2605,10 +2615,8 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 				SBIG_UINT(pdata,40,svfs.FreeFileNodes);
 				SBIG_UINT(pdata,48,svfs.FsIdentifier);
 				DEBUG(5,("call_trans2qfsinfo : SMB_QUERY_POSIX_FS_INFO succsessful\n"));
-#ifdef EOPNOTSUPP
-			} else if (rc == EOPNOTSUPP) {
+			} else if (rc == -1 && errno == ENOSYS) {
 				return ERROR_NT(NT_STATUS_INVALID_LEVEL);
-#endif /* EOPNOTSUPP */
 			} else {
 				DEBUG(0,("vfs_statvfs() failed for service [%s]\n",lp_servicename(SNUM(conn))));
 				return ERROR_DOS(ERRSRV,ERRerror);
@@ -2729,7 +2737,8 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 			 * Thursby MAC extension... ONLY on NTFS filesystems
 			 * once we do streams then we don't need this
 			 */
-			if (strequal(lp_fstype(SNUM(conn)),"NTFS")) {
+			if (!lp_stream_support(SNUM(conn)) &&
+			    strequal(lp_fstype(SNUM(conn)),"NTFS")) {
 				data_len = 88;
 				SIVAL(pdata,84,0x100); /* Don't support mac... */
 				break;
@@ -3191,6 +3200,104 @@ static char *store_file_unix_basic_info2(connection_struct *conn,
 	pdata += 8;
 
 	return pdata;
+}
+
+static unsigned int marshall_stream_info(connection_struct *conn,
+			    files_struct *fsp,
+			    const char *fname,
+			    int dosmode,
+			    SMB_BIG_UINT file_data_size,
+			    SMB_BIG_UINT file_data_allocation,
+			    char *pdata)
+{
+	unsigned int data_size = 0;
+	unsigned nextOffset = 0;
+	int count = 0;
+	int curr = 0;
+	char * namelist = NULL;
+	size_t * sizelist = NULL;
+
+	char * name;
+
+	size_t byte_len = 0;
+
+	if (!(dosmode & aDIR)) {
+	    /* Don't show ::$DATA for directories. If we do, the XP copy engine
+	     * tries to copy it, which results in all sorts of interesting
+	     * phenomena.
+	     */
+		byte_len += dos_PutUniCode(pdata + 24,"::$DATA",
+					(size_t)0xE, False);
+		SIVAL(pdata, nextOffset, 0); /* might overwrite this if
+						    more streams */
+		SIVAL(pdata,  4, byte_len); /* Byte length of unicode
+						    string ::$DATA */
+		SOFF_T(pdata, 8, file_data_size);
+		SIVAL(pdata, 16, file_data_allocation);
+		SIVAL(pdata, 20, 0); /* ??? */
+		data_size = 24 + byte_len;
+	}
+
+	count = SMB_VFS_STREAMINFO(conn, fsp, fname,
+			    &namelist, &sizelist);
+	if (count <= 0) {
+		return data_size;
+	}
+
+	DEBUG(4, ("streaminfo on %s gave %d streams\n",
+	    fsp ? fsp->fsp_name : fname, count));
+
+	for (name = namelist, curr = 0; curr < count; ++curr ) {
+		size_t nlen = strlen(name);
+
+/* TDB_ALIGN, renamed to avoid clashes. */
+#define STREAMINFO_ALIGN(x, a) (((x) + (a)-1) & ~((a)-1))
+
+		/* update the previous record's next
+		 * record offset ...
+		 */
+		data_size = STREAMINFO_ALIGN(data_size, 8);
+		SIVAL(pdata, nextOffset, data_size - nextOffset);
+
+#undef STREAMINFO_ALIGN
+
+		DEBUG(4, ("pushing name=%s size=%u\n",
+			name, (unsigned)sizelist[curr]));
+
+		/* remember where the next record offset
+		 * field is for this record ...
+		 */
+		nextOffset = data_size;
+		/* make sure it's clear ... */
+		SIVAL(pdata, nextOffset, 0);
+
+		/* now insert the new record .. */
+
+		byte_len = dos_PutUniCode(pdata + data_size + 24,
+			    name, nlen * 2, False);
+
+		/* add stream name length ... */
+		SIVAL(pdata, 4 + data_size, byte_len);
+
+		/* add stream size ... */
+		SOFF_T(pdata, 8 + data_size, (SMB_OFF_T)sizelist[curr]);
+
+		/* allocation size is the same as the
+		 * stream size ...
+		 */
+		SOFF_T(pdata,16 + data_size, (SMB_OFF_T)sizelist[curr]);
+		SIVAL(pdata, 20 + data_size, 0); /*??*/
+
+		data_size += 24 + byte_len;
+
+		/* Skip to next name. */
+		name += (nlen + 1);
+	}
+
+	SAFE_FREE(namelist);
+	SAFE_FREE(sizelist);
+
+	return data_size;
 }
 
 /****************************************************************************
@@ -3751,26 +3858,20 @@ total_data=%u (should be %u)\n", (unsigned int)total_data, (unsigned int)IVAL(pd
 			data_size = 4;
 			break;
 
-#if 0
 		/*
-		 * NT4 server just returns "invalid query" to this - if we try to answer
-		 * it then NTws gets a BSOD! (tridge).
+		 * NT4 server just returns "invalid query" to this - if we
+		 * try to answer it then NTws gets a BSOD! (tridge).
 		 * W2K seems to want this. JRA.
 		 */
+		/* The first statement above is false - verified using Thursby
+		 * client against NT4 -- gcolley.
+		 */
 		case SMB_QUERY_FILE_STREAM_INFO:
-#endif
 		case SMB_FILE_STREAM_INFORMATION:
 			DEBUG(10,("call_trans2qfilepathinfo: SMB_FILE_STREAM_INFORMATION\n"));
-			if (mode & aDIR) {
-				data_size = 0;
-			} else {
-				size_t byte_len = dos_PutUniCode(pdata+24,"::$DATA", (size_t)0xE, False);
-				SIVAL(pdata,0,0); /* ??? */
-				SIVAL(pdata,4,byte_len); /* Byte length of unicode string ::$DATA */
-				SOFF_T(pdata,8,file_size);
-				SOFF_T(pdata,16,allocation_size);
-				data_size = 24 + byte_len;
-			}
+			data_size = marshall_stream_info(conn, fsp,
+						fname, mode, file_size,
+						allocation_size, pdata);
 			break;
 
 		case SMB_QUERY_COMPRESSION_INFO:
@@ -4774,6 +4875,7 @@ static NTSTATUS smb_set_info_standard(connection_struct *conn,
 					const SMB_STRUCT_STAT *psbuf)
 {
 	struct timespec ts[2];
+	time_t create_time;
 
 	if (total_data < 12) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -4783,6 +4885,14 @@ static NTSTATUS smb_set_info_standard(connection_struct *conn,
 	ts[0] = convert_time_t_to_timespec(srv_make_unix_date2(pdata+l1_fdateLastAccess));
 	/* write time */
 	ts[1] = convert_time_t_to_timespec(srv_make_unix_date2(pdata+l1_fdateLastWrite));
+
+	/* create time */
+	/* XXX: this code should be int smb_set_file_time() -- jpeach */
+	create_time = srv_make_unix_date2(pdata+l1_fdateCreation);
+	/* They want to set the create time and the share is writable */
+	if ((!null_mtime(create_time)) && (CAN_WRITE(conn)) && !fsp) {
+		SMB_VFS_SET_CREATE_TIME(conn, fname, create_time);
+	}
 
 	DEBUG(10,("smb_set_info_standard: file %s\n",
 		fname ? fname : fsp->fsp_name ));
@@ -4805,6 +4915,7 @@ static NTSTATUS smb_set_file_basic_info(connection_struct *conn,
 					const char *fname,
 					SMB_STRUCT_STAT *psbuf)
 {
+	time_t create_time;
 	/* Patch to do this correctly from Paul Eggert <eggert@twinsun.com>. */
 	struct timespec write_time;
 	struct timespec changed_time;
@@ -4826,7 +4937,12 @@ static NTSTATUS smb_set_file_basic_info(connection_struct *conn,
 		return status;
 	}
 
-	/* Ignore create time at offset pdata. */
+	/* create time */
+	create_time = convert_timespec_to_time_t(interpret_long_date(pdata+0));
+	/* They want to set the create time and the share is writable */
+	if ((!null_mtime(create_time)) && (CAN_WRITE(conn)) && !fsp) {
+		SMB_VFS_SET_CREATE_TIME(conn, fname, create_time);
+	}
 
 	/* access time */
 	ts[0] = interpret_long_date(pdata+8);
@@ -5191,9 +5307,18 @@ size = %.0f, uid = %u, gid = %u, raw perms = 0%o\n",
 	 */
 
 	if ((set_owner != (uid_t)SMB_UID_NO_CHANGE) && (psbuf->st_uid != set_owner)) {
-		DEBUG(10,("smb_set_file_unix_basic: SMB_SET_FILE_UNIX_BASIC changing owner %u for file %s\n",
+		int ret;
+
+		DEBUG(10,("smb_set_file_unix_basic: SMB_SET_FILE_UNIX_BASIC changing owner %u for path %s\n",
 			(unsigned int)set_owner, fname ));
-		if (SMB_VFS_CHOWN(conn, fname, set_owner, (gid_t)-1) != 0) {
+
+		if (S_ISLNK(psbuf->st_mode)) {
+			ret = SMB_VFS_LCHOWN(conn, fname, set_owner, (gid_t)-1);
+		} else {
+			ret = SMB_VFS_CHOWN(conn, fname, set_owner, (gid_t)-1);
+		}
+
+		if (ret != 0) {
 			status = map_nt_error_from_unix(errno);
 			if (delete_on_fail) {
 				SMB_VFS_UNLINK(conn,fname);
@@ -5249,6 +5374,7 @@ static NTSTATUS smb_set_file_unix_info2(connection_struct *conn,
 					const char *fname,
 					SMB_STRUCT_STAT *psbuf)
 {
+	time_t create_time;
 	NTSTATUS status;
 	uint32 smb_fflags;
 	uint32 smb_fmask;
@@ -5264,6 +5390,12 @@ static NTSTATUS smb_set_file_unix_info2(connection_struct *conn,
 				fsp, fname, psbuf);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
+	}
+
+	create_time = convert_timespec_to_time_t(interpret_long_date(pdata+100)); /* create_time */
+	/* They want to set the create time and the share is writable */
+	if ((!null_mtime(create_time)) && (CAN_WRITE(conn)) && !fsp) {
+		SMB_VFS_SET_CREATE_TIME(conn, fname, create_time);
 	}
 
 	smb_fflags = IVAL(pdata, 108);

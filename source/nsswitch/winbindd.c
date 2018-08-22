@@ -7,6 +7,7 @@
    Copyright (C) Andrew Tridgell 2002
    Copyright (C) Jelmer Vernooij 2003
    Copyright (C) Volker Lendecke 2004
+   Copyright (C) 2007 Apple Inc. All rights reserved.
    
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -30,7 +31,6 @@
 #define DBGC_CLASS DBGC_WINBIND
 
 BOOL opt_nocache = False;
-static BOOL interactive = False;
 
 extern BOOL override_logfile;
 
@@ -119,13 +119,8 @@ static void flush_caches(void)
 
 static void terminate(void)
 {
-	pstring path;
 
-	/* Remove socket file */
-	pstr_sprintf(path, "%s/%s", 
-		 WINBINDD_SOCKET_DIR, WINBINDD_SOCKET_NAME);
-	unlink(path);
-
+	winbindd_release_sockets();
 	idmap_close();
 	
 	trustdom_cache_shutdown();
@@ -723,22 +718,13 @@ static BOOL remove_idle_client(void)
    simultaneous connections while remaining impervious to many denial of
    service attacks. */
 
-static void process_loop(void)
+static int process_loop(int listen_sock, int listen_priv_sock)
 {
 	struct winbindd_cli_state *state;
 	struct fd_event *ev;
 	fd_set r_fds, w_fds;
-	int maxfd, listen_sock, listen_priv_sock, selret;
+	int maxfd, selret;
 	struct timeval timeout, ev_timeout;
-
-	/* Open Sockets here to get stuff going ASAP */
-	listen_sock = open_winbindd_socket();
-	listen_priv_sock = open_winbindd_priv_socket();
-
-	if (listen_sock == -1 || listen_priv_sock == -1) {
-		perror("open_winbind_socket");
-		exit(1);
-	}
 
 	/* We'll be doing this a lot */
 
@@ -907,6 +893,55 @@ static void process_loop(void)
 			winbind_child_died(pid);
 		}
 	}
+
+
+	return winbindd_num_clients();
+}
+
+static void winbindd_process_loop(enum smb_server_mode server_mode)
+{
+	int idle_timeout_sec;
+	struct timeval starttime;
+	int listen_public, listen_priv;
+
+	errno = 0;
+	if (!winbindd_init_sockets(&listen_public, &listen_priv,
+				    &idle_timeout_sec)) {
+		terminate();
+	}
+
+	starttime = timeval_current();
+
+	if (listen_public == -1 || listen_priv == -1) {
+		DEBUG(0, ("failed to open winbindd pipes: %s\n",
+			    errno ? strerror(errno) : "unknown error"));
+		terminate();
+	}
+
+	for (;;) {
+		int clients = process_loop(listen_public, listen_priv);
+
+		/* Don't bother figuring out the idle time if we won't be
+		 * timing out anyway.
+		 */
+		if (idle_timeout_sec < 0) {
+			continue;
+		}
+
+		if (clients == 0 && server_mode == SERVER_MODE_FOREGROUND) {
+			struct timeval now;
+
+			now = timeval_current();
+			if (timeval_elapsed2(&starttime, &now) >
+				(double)idle_timeout_sec) {
+				DEBUG(0, ("idle for %d secs, exitting\n",
+					    idle_timeout_sec));
+				terminate();
+			}
+		} else {
+			starttime = timeval_current();
+		}
+	}
 }
 
 /* Main function */
@@ -914,15 +949,17 @@ static void process_loop(void)
 int main(int argc, char **argv, char **envp)
 {
 	pstring logfile;
-	static BOOL Fork = True;
 	static BOOL log_stdout = False;
 	static BOOL no_process_group = False;
+
+	enum smb_server_mode server_mode = SERVER_MODE_DAEMON;
+
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
 		{ "stdout", 'S', POPT_ARG_VAL, &log_stdout, True, "Log to stdout" },
-		{ "foreground", 'F', POPT_ARG_VAL, &Fork, False, "Daemon in foreground mode" },
+		{ "foreground", 'F', POPT_ARG_VAL, &server_mode, SERVER_MODE_FOREGROUND, "Daemon in foreground mode" },
 		{ "no-process-group", 0, POPT_ARG_VAL, &no_process_group, True, "Don't create a new process group" },
-		{ "interactive", 'i', POPT_ARG_NONE, NULL, 'i', "Interactive mode" },
+		{ "interactive", 'i', POPT_ARG_VAL, &server_mode, SERVER_MODE_INTERACTIVE, "Interactive mode" },
 		{ "no-caching", 'n', POPT_ARG_VAL, &opt_nocache, True, "Disable caching" },
 		POPT_COMMON_SAMBA
 		POPT_TABLEEND
@@ -960,20 +997,17 @@ int main(int argc, char **argv, char **envp)
 	pc = poptGetContext("winbindd", argc, (const char **)argv, long_options,
 						POPT_CONTEXT_KEEP_FIRST);
 
-	while ((opt = poptGetNextOpt(pc)) != -1) {
-		switch (opt) {
-			/* Don't become a daemon */
-		case 'i':
-			interactive = True;
-			log_stdout = True;
-			Fork = False;
-			break;
+	while ((opt = poptGetNextOpt(pc)) != -1) {}
+
+	if (server_mode == SERVER_MODE_INTERACTIVE) {
+		log_stdout = True;
+		if (DEBUGLEVEL >= 9) {
+			talloc_enable_leak_report();
 		}
 	}
 
-
-	if (log_stdout && Fork) {
-		printf("Can't log to stdout (-S) unless daemon is in foreground +(-F) or interactive (-i)\n");
+	if (log_stdout && server_mode == SERVER_MODE_DAEMON) {
+		printf("Can't log to stdout (-S) unless daemon is in foreground (-F) or interactive (-i)\n");
 		poptPrintUsage(pc, stderr, 0);
 		exit(1);
 	}
@@ -1044,8 +1078,12 @@ int main(int argc, char **argv, char **envp)
 	CatchSignal(SIGUSR2, sigusr2_handler);         /* Debugging sigs */
 	CatchSignal(SIGHUP, sighup_handler);
 
-	if (!interactive)
-		become_daemon(Fork, no_process_group);
+	if (server_mode == SERVER_MODE_DAEMON) {
+		DEBUG( 3, ( "Becoming a daemon.\n" ) );
+		become_daemon(True, no_process_group);
+	} else if (server_mode == SERVER_MODE_FOREGROUND) {
+		become_daemon(False, no_process_group);
+	}
 
 	pidfile_create("winbindd");
 
@@ -1054,8 +1092,9 @@ int main(int argc, char **argv, char **envp)
 	 * If we're interactive we want to set our own process group for
 	 * signal management.
 	 */
-	if (interactive && !no_process_group)
+	if (server_mode == SERVER_MODE_INTERACTIVE && !no_process_group) {
 		setpgid( (pid_t)0, (pid_t)0);
+	}
 #endif
 
 	TimeInit();
@@ -1098,9 +1137,7 @@ int main(int argc, char **argv, char **envp)
 	smb_nscd_flush_group_cache();
 
 	/* Loop waiting for requests */
-
-	while (1)
-		process_loop();
+	winbindd_process_loop(server_mode);
 
 	return 0;
 }

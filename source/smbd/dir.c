@@ -159,10 +159,8 @@ static void dptr_idleoldest(void)
 	 */
 
 	for(; dptr; dptr = dptr->prev) {
-		if (dptr->dir_hnd) {
-			dptr_idle(dptr);
-			return;
-		}
+		dptr_idle(dptr);
+		return;
 	}
 }
 
@@ -317,8 +315,9 @@ void dptr_idlecnum(connection_struct *conn)
 {
 	struct dptr_struct *dptr;
 	for(dptr = dirptrs; dptr; dptr = dptr->next) {
-		if (dptr->conn == conn && dptr->dir_hnd)
+		if (dptr->conn == conn) {
 			dptr_idle(dptr);
+		}
 	}
 }
 
@@ -331,8 +330,9 @@ void dptr_closepath(char *path,uint16 spid)
 	struct dptr_struct *dptr, *next;
 	for(dptr = dirptrs; dptr; dptr = next) {
 		next = dptr->next;
-		if (spid == dptr->spid && strequal(dptr->path,path))
+		if (spid == dptr->spid && strequal(dptr->path,path)) {
 			dptr_close_internal(dptr);
+		}
 	}
 }
 
@@ -629,16 +629,35 @@ const char *dptr_ReadDirName(struct dptr_struct *dptr, long *poffset, SMB_STRUCT
 			}
 		}
 
-		/* In case sensitive mode we don't search - we know if it doesn't exist 
-		   with a stat we will fail. */
+		/* Stat failed. We know this is authoratiative if we are
+		 * providing case sensitive semantics or the underlying
+		 * filesystem is case sensitive.
+		 */
 
-		if (dptr->conn->case_sensitive) {
+		if (dptr->conn->case_sensitive ||
+		    !(dptr->conn->fs_capabilities & FILE_CASE_SENSITIVE_SEARCH)) {
 			/* We need to set the underlying dir_hnd offset to -1 also as
 			   this function is usually called with the output from TellDir. */
 			dptr->dir_hnd->offset = *poffset = END_OF_DIRECTORY_OFFSET;
 			return NULL;
 		}
 	}
+
+	/* We can get here if we were searching for a filename (not a wildcard)
+	 * but we weren't able to open the containing directory. We have no
+	 * hope of iterating, so we can only return NULL here.
+	 */
+	if (dptr->dir_hnd->dir == NULL) {
+		/* XXX What we should be doing here is saving the errno from
+		 * when we originally failed to open the directory. We need to
+		 * return an NT_STATUS at this point so we can faithfully tell
+		 * the client that we couldn't search for the file (distinct
+		 * from the file not being found).
+		 */
+		dptr->dir_hnd->offset = *poffset = END_OF_DIRECTORY_OFFSET;
+		return NULL;
+	}
+
 	return dptr_normal_ReadDirName(dptr, poffset, pst);
 }
 
@@ -868,12 +887,7 @@ static BOOL user_can_read_file(connection_struct *conn, char *name, SMB_STRUCT_S
 		return True;
 	}
 
-	/* If we can't stat it does not show it */
-	if (!VALID_STAT(*pst) && (SMB_VFS_STAT(conn, name, pst) != 0)) {
-		DEBUG(10,("user_can_read_file: SMB_VFS_STAT failed for file %s with error %s\n",
-			name, strerror(errno) ));
-		return False;
-	}
+	SMB_ASSERT(VALID_STAT(*pst));
 
 	/* Pseudo-open the file (note - no fd's created). */
 
@@ -932,10 +946,7 @@ static BOOL user_can_write_file(connection_struct *conn, char *name, SMB_STRUCT_
 		return True;
 	}
 
-	/* If we can't stat it does not show it */
-	if (!VALID_STAT(*pst) && (SMB_VFS_STAT(conn, name, pst) != 0)) {
-		return False;
-	}
+	SMB_ASSERT(VALID_STAT(*pst));
 
 	/* Pseudo-open the file */
 
@@ -983,9 +994,7 @@ static BOOL file_is_special(connection_struct *conn, char *name, SMB_STRUCT_STAT
 	if (conn->admin_user)
 		return False;
 
-	/* If we can't stat it does not show it */
-	if (!VALID_STAT(*pst) && (SMB_VFS_STAT(conn, name, pst) != 0))
-		return True;
+	SMB_ASSERT(VALID_STAT(*pst));
 
 	if (S_ISREG(pst->st_mode) || S_ISDIR(pst->st_mode) || S_ISLNK(pst->st_mode))
 		return False;
@@ -994,7 +1003,9 @@ static BOOL file_is_special(connection_struct *conn, char *name, SMB_STRUCT_STAT
 }
 
 /*******************************************************************
- Should the file be seen by the client ?
+ Should the file be seen by the client ? NOTE: A successful return
+ is no guarantee of the file's existence ... you also have to check
+ whether pst is valid.
 ********************************************************************/
 
 BOOL is_visible_file(connection_struct *conn, const char *dir_path, const char *name, SMB_STRUCT_STAT *pst, BOOL use_veto)
@@ -1031,6 +1042,15 @@ BOOL is_visible_file(connection_struct *conn, const char *dir_path, const char *
 			return True;
 		}
 
+		/* If the file name does not exist, there's no point checking
+		 * the configuration options. We succeed, on the basis that the
+		 * checks *might* have passed if the file was present.
+		 */
+		if (SMB_VFS_STAT(conn, entry, pst) != 0) {
+		        SAFE_FREE(entry);
+		        return True;
+		}
+
 		/* Honour _hide unreadable_ option */
 		if (hide_unreadable && !user_can_read_file(conn, entry, pst)) {
 			DEBUG(10,("is_visible_file: file %s is unreadable.\n", entry ));
@@ -1058,7 +1078,7 @@ BOOL is_visible_file(connection_struct *conn, const char *dir_path, const char *
  Open a directory.
 ********************************************************************/
 
-struct smb_Dir *OpenDir(connection_struct *conn, const char *name, const char *mask, uint32 attr)
+struct smb_Dir *OpenDir(connection_struct *conn, const char *path, const char *mask, uint32 attr)
 {
 	struct smb_Dir *dirp = SMB_MALLOC_P(struct smb_Dir);
 
@@ -1070,14 +1090,30 @@ struct smb_Dir *OpenDir(connection_struct *conn, const char *name, const char *m
 	dirp->conn = conn;
 	dirp->name_cache_size = lp_directory_name_cache_size(SNUM(conn));
 
-	dirp->dir_path = SMB_STRDUP(name);
+	dirp->dir_path = SMB_STRDUP(path);
 	if (!dirp->dir_path) {
 		goto fail;
 	}
+
 	dirp->dir = SMB_VFS_OPENDIR(conn, dirp->dir_path, mask, attr);
 	if (!dirp->dir) {
-		DEBUG(5,("OpenDir: Can't open %s. %s\n", dirp->dir_path, strerror(errno) ));
-		goto fail;
+		/* Unless we will be doing a wildcard search, iterating over
+		 * the whole directory, or the path isn't a directory,
+		 * we can try to muddle on without a directory handle.
+		 */
+		if (errno == ENOENT || errno == ENOTDIR ||
+		    mask == NULL || ms_has_wild(mask)) {
+			DEBUG(5, ("OpenDir: can't open directory '%s': %s\n",
+				dirp->dir_path, strerror(errno) ));
+			goto fail;
+		}
+
+		/* We now have a directory handle that is not backed by an open
+		 * directory. The only valid operation is to close or to read
+		 * the (non-wildcard) name.
+		 */
+		DEBUG(5, ("OpenDir: can't open directory '%s': %s, continuing\n",
+			dirp->dir_path, strerror(errno) ));
 	}
 
 	if (dirp->name_cache_size) {
@@ -1140,6 +1176,8 @@ const char *ReadDirName(struct smb_Dir *dirp, long *poffset)
 	const char *n;
 	connection_struct *conn = dirp->conn;
 
+	SMB_ASSERT(dirp->dir != NULL);
+
 	/* Cheat to allow . and .. to be the first entries returned. */
 	if (((*poffset == START_OF_DIRECTORY_OFFSET) || (*poffset == DOT_DOT_DIRECTORY_OFFSET)) && (dirp->file_number < 2)) {
 		if (dirp->file_number == 0) {
@@ -1180,7 +1218,10 @@ const char *ReadDirName(struct smb_Dir *dirp, long *poffset)
 
 void RewindDir(struct smb_Dir *dirp, long *poffset)
 {
+	SMB_ASSERT(dirp->dir != NULL);
+
 	SMB_VFS_REWINDDIR(dirp->conn, dirp->dir);
+
 	dirp->file_number = 0;
 	dirp->offset = START_OF_DIRECTORY_OFFSET;
 	*poffset = START_OF_DIRECTORY_OFFSET;
@@ -1192,6 +1233,7 @@ void RewindDir(struct smb_Dir *dirp, long *poffset)
 
 void SeekDir(struct smb_Dir *dirp, long offset)
 {
+	SMB_ASSERT(dirp->dir != NULL);
 	if (offset != dirp->offset) {
 		if (offset == START_OF_DIRECTORY_OFFSET) {
 			RewindDir(dirp, &offset);
@@ -1258,6 +1300,11 @@ BOOL SearchDir(struct smb_Dir *dirp, const char *name, long *poffset)
 	int i;
 	const char *entry;
 	connection_struct *conn = dirp->conn;
+
+	/* Search is only valid for wildcards and we must have an open
+	 * directory for those.
+	 */
+	SMB_ASSERT(dirp->dir != NULL);
 
 	/* Search back in the name cache. */
 	if (dirp->name_cache_size && dirp->name_cache) {

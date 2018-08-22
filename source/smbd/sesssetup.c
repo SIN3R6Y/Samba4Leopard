@@ -68,9 +68,9 @@ static int add_signature(char *outbuf, char *p)
 
 	fstr_sprintf( lanman, "Samba %s", SAMBA_VERSION_STRING);
 
-	p += srvstr_push(outbuf, p, "Unix", BUFFER_SIZE - (p - outbuf), STR_TERMINATE);
-	p += srvstr_push(outbuf, p, lanman, BUFFER_SIZE - (p - outbuf), STR_TERMINATE);
-	p += srvstr_push(outbuf, p, lp_workgroup(), BUFFER_SIZE - (p - outbuf), STR_TERMINATE);
+	p += srvstr_push(outbuf, p, "Unix", -1, STR_TERMINATE);
+	p += srvstr_push(outbuf, p, lanman, -1, STR_TERMINATE);
+	p += srvstr_push(outbuf, p, lp_workgroup(), -1, STR_TERMINATE);
 
 	return PTR_DIFF(p, start);
 }
@@ -226,6 +226,7 @@ static BOOL make_krb5_skew_error(DATA_BLOB *pblob_out)
 static int reply_spnego_kerberos(connection_struct *conn, 
 				 char *inbuf, char *outbuf,
 				 int length, int bufsize,
+				 char *mechOID,
 				 DATA_BLOB *secblob,
 				 BOOL *p_invalidate_vuid)
 {
@@ -247,6 +248,7 @@ static int reply_spnego_kerberos(connection_struct *conn,
 	BOOL map_domainuser_to_guest = False;
 	BOOL username_was_mapped;
 	PAC_LOGON_INFO *logon_info = NULL;
+	BOOL trustaccount = False;
 
 	ZERO_STRUCT(ticket);
 	ZERO_STRUCT(pac_data);
@@ -268,6 +270,28 @@ static int reply_spnego_kerberos(connection_struct *conn,
 	}
 
 	ret = ads_verify_ticket(mem_ctx, lp_realm(), 0, &ticket, &client, &pac_data, &ap_rep, &session_key);
+
+	if (!NT_STATUS_IS_OK(ret)) {
+		DEBUG(4, ("reply_spnego_kerberos: %s for managed realm '%s'\n",
+			nt_errstr(ret),
+			lp_realm()));
+	} else {
+	    goto skip_lkdc_verify;
+	}
+
+	 ret = ads_verify_ticket(mem_ctx,
+			lp_parm_const_string(GLOBAL_SECTION_SNUM,
+				"com.apple", "lkdc realm", ""),
+			 0, &ticket, &client, &pac_data, &ap_rep, &session_key);
+
+	if (!NT_STATUS_IS_OK(ret)) {
+		DEBUG(4, ("reply_spnego_kerberos: %s for lkdc realm '%s'\n",
+			nt_errstr(ret),
+			lp_parm_const_string(GLOBAL_SECTION_SNUM,
+				"com.apple", "lkdc realm", "")));
+	}
+
+skip_lkdc_verify:
 
 	data_blob_free(&ticket);
 
@@ -407,6 +431,28 @@ static int reply_spnego_kerberos(connection_struct *conn,
 
 	pw = smb_getpwnam( mem_ctx, user, real_username, True );
 
+	if (!pw && lp_opendirectory() && strchr_m(client, '$')) {
+		struct samu *sam_pass = NULL;
+               	char *fullname = NULL;
+
+               	DEBUG(1,("Lookup trust account via passdb (%s)\n",user));
+
+               	sam_pass = samu_new(NULL);
+               	trustaccount = pdb_getsampwnam(sam_pass, client);
+
+		/* If this is a trust account, map it to guest because OD
+		 * doesn't have a corresponding user account.
+		 */
+               	if (trustaccount == True) {
+	       		fullname = pdb_get_fullname (sam_pass);
+			map_domainuser_to_guest = True;
+                       	fstrcpy(real_username, fullname);
+                       	DEBUG(1,("trust account found via passdb fullname(%s)\n",fullname));
+               	}
+
+               	TALLOC_FREE(sam_pass);
+       	}
+
 	if (pw) {
 		/* if a real user check pam account restrictions */
 		/* only really perfomed if "obey pam restriction" is true */
@@ -427,7 +473,8 @@ static int reply_spnego_kerberos(connection_struct *conn,
 		   did not have a local uid but has been authenticated, then 
 		   map them to a guest account */
 
-		if (lp_map_to_guest() == MAP_TO_GUEST_ON_BAD_UID){ 
+		if (map_domainuser_to_guest ||
+		    lp_map_to_guest() == MAP_TO_GUEST_ON_BAD_UID) {
 			map_domainuser_to_guest = True;
 			fstrcpy(user,lp_guestaccount());
 			pw = smb_getpwnam( mem_ctx, user, real_username, True );
@@ -538,7 +585,7 @@ static int reply_spnego_kerberos(connection_struct *conn,
 	} else {
 		ap_rep_wrapped = data_blob(NULL, 0);
 	}
-	response = spnego_gen_auth_response(&ap_rep_wrapped, ret, OID_KERBEROS5_OLD);
+	response = spnego_gen_auth_response(&ap_rep_wrapped, ret, mechOID);
 	reply_sesssetup_blob(conn, outbuf, response, ret);
 
 	data_blob_free(&ap_rep);
@@ -624,7 +671,7 @@ static BOOL reply_spnego_ntlmssp(connection_struct *conn, char *inbuf, char *out
 		/* NB. This is *NOT* an error case. JRA */
 		auth_ntlmssp_end(auth_ntlmssp_state);
 		/* Kill the intermediate vuid */
-		invalidate_intermediate_vuid(vuid);
+		invalidate_vuid(vuid);
 	}
 
 	return ret;
@@ -634,12 +681,13 @@ static BOOL reply_spnego_ntlmssp(connection_struct *conn, char *inbuf, char *out
  Is this a krb5 mechanism ?
 ****************************************************************************/
 
-static NTSTATUS parse_spnego_mechanisms(DATA_BLOB blob_in, DATA_BLOB *pblob_out, BOOL *p_is_krb5)
+static NTSTATUS parse_spnego_mechanisms(DATA_BLOB blob_in, DATA_BLOB *pblob_out, char **kerb_mechOID)
 {
 	char *OIDs[ASN1_MAX_OIDS];
 	int i;
+	NTSTATUS ret = NT_STATUS_OK;
 
-	*p_is_krb5 = False;
+	*kerb_mechOID = NULL;
 
 	/* parse out the OIDs and the first sec blob */
 	if (!parse_negTokenTarg(blob_in, OIDs, pblob_out)) {
@@ -659,7 +707,9 @@ static NTSTATUS parse_spnego_mechanisms(DATA_BLOB blob_in, DATA_BLOB *pblob_out,
 #ifdef HAVE_KRB5	
 	if (strcmp(OID_KERBEROS5, OIDs[0]) == 0 ||
 	    strcmp(OID_KERBEROS5_OLD, OIDs[0]) == 0) {
-		*p_is_krb5 = True;
+		*kerb_mechOID = strdup(OIDs[0]);
+		if (*kerb_mechOID == NULL)
+			ret = NT_STATUS_NO_MEMORY;
 	}
 #endif
 		
@@ -667,7 +717,7 @@ static NTSTATUS parse_spnego_mechanisms(DATA_BLOB blob_in, DATA_BLOB *pblob_out,
 		DEBUG(5,("parse_spnego_mechanisms: Got OID %s\n", OIDs[i]));
 		free(OIDs[i]);
 	}
-	return NT_STATUS_OK;
+	return ret;
 }
 
 /****************************************************************************
@@ -684,40 +734,35 @@ static int reply_spnego_negotiate(connection_struct *conn,
 {
 	DATA_BLOB secblob;
 	DATA_BLOB chal;
-	BOOL got_kerberos_mechanism = False;
+	char *kerb_mech;
 	NTSTATUS status;
 
-	status = parse_spnego_mechanisms(blob1, &secblob, &got_kerberos_mechanism);
+	status = parse_spnego_mechanisms(blob1, &secblob, &kerb_mech);
 	if (!NT_STATUS_IS_OK(status)) {
 		/* Kill the intermediate vuid */
-		invalidate_intermediate_vuid(vuid);
+		invalidate_vuid(vuid);
 		return ERROR_NT(nt_status_squash(status));
 	}
 
 	DEBUG(3,("reply_spnego_negotiate: Got secblob of size %lu\n", (unsigned long)secblob.length));
 
 #ifdef HAVE_KRB5
-	if ( got_kerberos_mechanism && ((lp_security()==SEC_ADS) || lp_use_kerberos_keytab()) ) {
+	if ( kerb_mech && ((lp_security()==SEC_ADS) || lp_use_kerberos_keytab()) ) {
 		BOOL destroy_vuid = True;
 		int ret = reply_spnego_kerberos(conn, inbuf, outbuf, 
-						length, bufsize, &secblob, &destroy_vuid);
+						length, bufsize, kerb_mech,
+						&secblob, &destroy_vuid);
 		data_blob_free(&secblob);
 		if (destroy_vuid) {
 			/* Kill the intermediate vuid */
-			invalidate_intermediate_vuid(vuid);
+			invalidate_vuid(vuid);
 		}
+		free(kerb_mech);
 		return ret;
 	}
+	if (kerb_mech)
+		free(kerb_mech);
 #endif
-
-	if (got_kerberos_mechanism) {
-		invalidate_intermediate_vuid(vuid);
-		DEBUG(3,("reply_spnego_negotiate: network "
-			"misconfiguration, client sent us a "
-			"krb5 ticket and kerberos security "
-			"not enabled"));
-		return ERROR_NT(nt_status_squash(NT_STATUS_LOGON_FAILURE));
-	}
 
 	if (*auth_ntlmssp_state) {
 		auth_ntlmssp_end(auth_ntlmssp_state);
@@ -726,7 +771,7 @@ static int reply_spnego_negotiate(connection_struct *conn,
 	status = auth_ntlmssp_start(auth_ntlmssp_state);
 	if (!NT_STATUS_IS_OK(status)) {
 		/* Kill the intermediate vuid */
-		invalidate_intermediate_vuid(vuid);
+		invalidate_vuid(vuid);
 		return ERROR_NT(nt_status_squash(status));
 	}
 
@@ -764,55 +809,59 @@ static int reply_spnego_auth(connection_struct *conn, char *inbuf, char *outbuf,
 		file_save("auth.dat", blob1.data, blob1.length);
 #endif
 		/* Kill the intermediate vuid */
-		invalidate_intermediate_vuid(vuid);
+		invalidate_vuid(vuid);
 
-		return ERROR_NT(nt_status_squash(NT_STATUS_LOGON_FAILURE));
+		return ERROR_NT(nt_status_squash(NT_STATUS_INVALID_PARAMETER));
 	}
 
 	if (auth.data[0] == ASN1_APPLICATION(0)) {
 		/* Might be a second negTokenTarg packet */
 
-		BOOL got_krb5_mechanism = False;
-		status = parse_spnego_mechanisms(auth, &secblob, &got_krb5_mechanism);
+		char *kerb_mech = NULL;
+		status = parse_spnego_mechanisms(auth, &secblob, &kerb_mech);
 		if (NT_STATUS_IS_OK(status)) {
 			DEBUG(3,("reply_spnego_auth: Got secblob of size %lu\n", (unsigned long)secblob.length));
 #ifdef HAVE_KRB5
-			if ( got_krb5_mechanism && ((lp_security()==SEC_ADS) || lp_use_kerberos_keytab()) ) {
+			if ( kerb_mech && ((lp_security()==SEC_ADS) || lp_use_kerberos_keytab()) ) {
 				BOOL destroy_vuid = True;
 				int ret = reply_spnego_kerberos(conn, inbuf, outbuf, 
-								length, bufsize, &secblob, &destroy_vuid);
+								length, bufsize, kerb_mech,
+								&secblob, &destroy_vuid);
 				data_blob_free(&secblob);
 				data_blob_free(&auth);
 				if (destroy_vuid) {
 					/* Kill the intermediate vuid */
-					invalidate_intermediate_vuid(vuid);
+					invalidate_vuid(vuid);
 				}
+				free(kerb_mech);
 				return ret;
 			}
+			if (kerb_mech)
+				free(kerb_mech);
 #endif
 		}
 	}
 
 	/* If we get here it wasn't a negTokenTarg auth packet. */
 	data_blob_free(&secblob);
-
+	
 	if (!*auth_ntlmssp_state) {
 		/* Kill the intermediate vuid */
-		invalidate_intermediate_vuid(vuid);
+		invalidate_vuid(vuid);
 
 		/* auth before negotiatiate? */
-		return ERROR_NT(NT_STATUS_LOGON_FAILURE);
+		return ERROR_NT(nt_status_squash(NT_STATUS_INVALID_PARAMETER));
 	}
-
-	status = auth_ntlmssp_update(*auth_ntlmssp_state,
+	
+	status = auth_ntlmssp_update(*auth_ntlmssp_state, 
 					auth, &auth_reply);
 
 	data_blob_free(&auth);
 
-	reply_spnego_ntlmssp(conn, inbuf, outbuf, vuid,
+	reply_spnego_ntlmssp(conn, inbuf, outbuf, vuid, 
 			     auth_ntlmssp_state,
 			     &auth_reply, status, True);
-
+		
 	data_blob_free(&auth_reply);
 
 	/* and tell smbd that we have already replied to this packet */
@@ -1043,7 +1092,9 @@ static int reply_sesssetup_and_X_spnego(connection_struct *conn, char *inbuf,
 		if (!(global_client_caps & CAP_STATUS32)) {
 			remove_from_common_flags2(FLAGS2_32_BIT_ERROR_CODES);
 		}
-
+		/* They say they support UNIX CAPS assume they are a UNIX Client */
+		if (global_client_caps & CAP_UNIX)
+			set_remote_arch(RA_CIFSFS);
 	}
 		
 	p = (uint8 *)smb_buf(inbuf);
@@ -1121,7 +1172,7 @@ static int reply_sesssetup_and_X_spnego(connection_struct *conn, char *inbuf,
 	if (!NT_STATUS_IS_OK(status)) {
 		if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
 			/* Real error - kill the intermediate vuid */
-			invalidate_intermediate_vuid(vuid);
+			invalidate_vuid(vuid);
 		}
 		data_blob_free(&blob1);
 		return ERROR_NT(nt_status_squash(status));
@@ -1149,7 +1200,7 @@ static int reply_sesssetup_and_X_spnego(connection_struct *conn, char *inbuf,
 			status = auth_ntlmssp_start(&vuser->auth_ntlmssp_state);
 			if (!NT_STATUS_IS_OK(status)) {
 				/* Kill the intermediate vuid */
-				invalidate_intermediate_vuid(vuid);
+				invalidate_vuid(vuid);
 				data_blob_free(&blob1);
 				return ERROR_NT(nt_status_squash(status));
 			}
@@ -1316,6 +1367,10 @@ int reply_sesssetup_and_X(connection_struct *conn, char *inbuf,char *outbuf,
 					set_remote_arch( RA_WIN95);
 				}
 			}
+			/* They say they support UNIX CAPS assume they are a UNIX Client */
+			if (global_client_caps & CAP_UNIX)
+				set_remote_arch(RA_CIFSFS);
+
 		}
 
 		if (!doencrypt) {

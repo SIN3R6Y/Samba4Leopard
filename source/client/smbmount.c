@@ -789,7 +789,7 @@ static void parse_mount_smb(int argc, char **argv)
 			} else if(!strcmp(opts, "uid")) {
 				mount_uid = nametouid(opteq+1);
 			} else if(!strcmp(opts, "gid")) {
-				mount_gid = nametogid(opteq+1);
+				nametogid(opteq+1, &mount_gid);
 			} else if(!strcmp(opts, "port")) {
 				smb_port = val;
 			} else if(!strcmp(opts, "fmask")) {

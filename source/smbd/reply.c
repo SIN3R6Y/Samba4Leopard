@@ -56,6 +56,7 @@ NTSTATUS check_path_syntax_internal(pstring destname,
 	const char *s = srcname;
 	NTSTATUS ret = NT_STATUS_OK;
 	BOOL start_of_name_component = True;
+	BOOL stream_component = False;;
 
 	*p_last_component_contains_wcard = False;
 
@@ -122,10 +123,13 @@ NTSTATUS check_path_syntax_internal(pstring destname,
 
 		if (!(*s & 0x80)) {
 			if (!posix_path) {
-				if (*s <= 0x1f) {
+				if (!stream_component && *s <= 0x1f) {
 					return NT_STATUS_OBJECT_NAME_INVALID;
 				}
 				switch (*s) {
+					case ':':
+						stream_component = True;
+						break;
 					case '*':
 					case '?':
 					case '<':
@@ -1300,6 +1304,11 @@ int reply_open(connection_struct *conn, char *inbuf,char *outbuf, int dum_size, 
 		return ERROR_NT(status);
 	}
 
+	if( is_ntfs_stream_name(fname)) {
+		END_PROFILE(SMBopen);
+		return ERROR_NT(NT_STATUS_OBJECT_PATH_NOT_FOUND);
+	}
+
 	if (!map_open_params_to_ntcreate(fname, deny_mode, OPENX_FILE_EXISTS_OPEN,
 			&access_mask, &share_mode, &create_disposition, &create_options)) {
 		END_PROFILE(SMBopen);
@@ -1429,6 +1438,11 @@ int reply_open_and_X(connection_struct *conn, char *inbuf,char *outbuf,int lengt
 	if (!NT_STATUS_IS_OK(status)) {
 		END_PROFILE(SMBopenX);
 		return ERROR_NT(status);
+	}
+
+	if (is_ntfs_stream_name(fname)) {
+		END_PROFILE(SMBopenX);
+		return ERROR_NT(NT_STATUS_OBJECT_PATH_NOT_FOUND);
 	}
 
 	if (!map_open_params_to_ntcreate(fname, deny_mode, smb_ofun,
@@ -2204,7 +2218,7 @@ void send_file_readbraw(connection_struct *conn, files_struct *fsp, SMB_OFF_T st
 	 */
 
 	if ( (chain_size == 0) && (nread > 0) &&
-	    (fsp->wcp == NULL) && lp_use_sendfile(SNUM(conn)) ) {
+	    (fsp->wcp == NULL) && (fsp->is_sendfile_capable) ) {
 		DATA_BLOB header;
 
 		_smb_setlen(outbuf,nread);
@@ -2547,7 +2561,7 @@ int send_file_readX(connection_struct *conn, char *inbuf,char *outbuf,int length
 	 */
 
 	if ((chain_size == 0) && (CVAL(inbuf,smb_vwv0) == 0xFF) &&
-	    lp_use_sendfile(SNUM(conn)) && (fsp->wcp == NULL) ) {
+	    (fsp->is_sendfile_capable) && (fsp->wcp == NULL) ) {
 		SMB_STRUCT_STAT sbuf;
 		DATA_BLOB header;
 
@@ -4226,6 +4240,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn, files_struct *fsp, pstrin
 	NTSTATUS status = NT_STATUS_OK;
 	BOOL dest_exists;
 	struct share_mode_lock *lck = NULL;
+	BOOL check_dest_exist = True;
 
 	ZERO_STRUCT(sbuf);
 
@@ -4279,6 +4294,13 @@ NTSTATUS rename_internals_fsp(connection_struct *conn, files_struct *fsp, pstrin
 			 * the original.
 			 */
 			pstrcpy(p+1, newname_last_component);
+			/*
+			 * We are renaming the same item to a different case,
+			 * there is no reason to check to see if the item
+			 * exists. If the local file system is case insensitive.
+			 */
+			if (!(conn->fs_capabilities & FILE_CASE_SENSITIVE_SEARCH))
+				check_dest_exist = False;
 		}
 	}
 
@@ -4293,33 +4315,41 @@ NTSTATUS rename_internals_fsp(connection_struct *conn, files_struct *fsp, pstrin
 		return NT_STATUS_OK;
 	}
 
-	dest_exists = vfs_object_exist(conn,newname,NULL);
+	/*
+	 * The check_dest_exist is only set to false when the the file system is case
+	 * insensitive and we are just renaming the item to a different case. No sense
+	 * checking to see if it exist in this case since we know it does. We will
+	 * just let the underlining file system handle the exist issues.
+	 */
+	if (check_dest_exist) {
+		dest_exists = vfs_object_exist(conn,newname,NULL);
 
-	if(!replace_if_exists && dest_exists) {
-		DEBUG(3,("rename_internals_fsp: dest exists doing rename %s -> %s\n",
-			fsp->fsp_name,newname));
-		return NT_STATUS_OBJECT_NAME_COLLISION;
-	}
-
-	/* Ensure we have a valid stat struct for the source. */
-	if (fsp->fh->fd != -1) {
-		if (SMB_VFS_FSTAT(fsp,fsp->fh->fd,&sbuf) == -1) {
-			return map_nt_error_from_unix(errno);
+		if(!replace_if_exists && dest_exists) {
+			DEBUG(3,("rename_internals_fsp: dest exists doing rename %s -> %s\n",
+				fsp->fsp_name,newname));
+			return NT_STATUS_OBJECT_NAME_COLLISION;
 		}
-	} else {
-		if (SMB_VFS_STAT(conn,fsp->fsp_name,&sbuf) == -1) {
-			return map_nt_error_from_unix(errno);
+
+		/* Ensure we have a valid stat struct for the source. */
+		if (fsp->fh->fd != -1) {
+			if (SMB_VFS_FSTAT(fsp,fsp->fh->fd,&sbuf) == -1) {
+				return map_nt_error_from_unix(errno);
+			}
+		} else {
+			if (SMB_VFS_STAT(conn,fsp->fsp_name,&sbuf) == -1) {
+				return map_nt_error_from_unix(errno);
+			}
 		}
-	}
 
-	status = can_rename(conn,fsp->fsp_name,attrs,&sbuf,True);
+		status = can_rename(conn,fsp->fsp_name,attrs,&sbuf,True);
 
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(3,("rename_internals_fsp: Error %s rename %s -> %s\n",
-			nt_errstr(status), fsp->fsp_name,newname));
-		if (NT_STATUS_EQUAL(status,NT_STATUS_SHARING_VIOLATION))
-			status = NT_STATUS_ACCESS_DENIED;
-		return status;
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(3,("rename_internals_fsp: Error %s rename %s -> %s\n",
+				nt_errstr(status), fsp->fsp_name,newname));
+			if (NT_STATUS_EQUAL(status,NT_STATUS_SHARING_VIOLATION))
+				status = NT_STATUS_ACCESS_DENIED;
+			return status;
+		}
 	}
 
 	if (rename_path_prefix_equal(fsp->fsp_name, newname)) {
@@ -4442,6 +4472,7 @@ NTSTATUS rename_internals(connection_struct *conn,
 	const char *dname;
 	long offset = 0;
 	pstring destname;
+	BOOL check_dest_exist = True;
 
 	*directory = *mask = 0;
 
@@ -4564,6 +4595,14 @@ NTSTATUS rename_internals(connection_struct *conn,
 				 * the original.
 				 */
 				pstrcpy(p+1, last_component_dest);
+				/*
+				 * We are renaming the same item to a different
+				 * case, there is no reason to check to see if
+				 * the item exists. If the local file system is
+				 * case insensitive.
+				 */
+				if (!(conn->fs_capabilities & FILE_CASE_SENSITIVE_SEARCH))
+					check_dest_exist = False;
 			}
 		}
 	
@@ -4619,7 +4658,6 @@ NTSTATUS rename_internals(connection_struct *conn,
 		 * If the src and dest names are identical - including case,
 		 * don't do the rename, just return success.
 		 */
-
 		if (strcsequal(directory, newname)) {
 			DEBUG(3, ("rename_internals: identical names in "
 				  "rename %s - returning success\n",
@@ -4627,7 +4665,20 @@ NTSTATUS rename_internals(connection_struct *conn,
 			return NT_STATUS_OK;
 		}
 
-		if(!replace_if_exists && vfs_object_exist(conn,newname,NULL)) {
+
+		/*
+		 * We don't care if the item exist in the following cases:
+		 *
+		 * 1. They want us to replace the item even if it exist.
+		 *
+		 * 2. The check_dest_exist flag is set to false. This can only
+		 * happen when the file system is case insensitive and we are
+		 * just renaming the item to a different case. No sense
+		 * checking to see if it exist in this case since we know it
+		 * does. We will just let the underlining file system handle
+		 * the exist issues.
+		 */
+		if(check_dest_exist && !replace_if_exists && vfs_object_exist(conn,newname,NULL)) {
 			DEBUG(3,("rename_internals: dest exists doing "
 				 "rename %s -> %s\n", directory, newname));
 			return NT_STATUS_OBJECT_NAME_COLLISION;

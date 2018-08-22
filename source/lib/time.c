@@ -829,6 +829,9 @@ void put_long_date(char *p, time_t t)
 
 time_t get_create_time(const SMB_STRUCT_STAT *st,BOOL fake_dirs)
 {
+#ifdef HAVE_STAT_ST_BIRTHTIMESPEC
+       return st->st_birthtimespec.tv_sec;
+#else
 	time_t ret, ret1;
 
 	if(S_ISDIR(st->st_mode) && fake_dirs) {
@@ -847,6 +850,7 @@ time_t get_create_time(const SMB_STRUCT_STAT *st,BOOL fake_dirs)
 	 * Just return MIN(ctime, mtime).
 	 */
 	return ret;
+#endif
 }
 
 struct timespec get_create_timespec(const SMB_STRUCT_STAT *st,BOOL fake_dirs)

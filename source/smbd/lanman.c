@@ -1735,6 +1735,13 @@ static BOOL api_RNetShareEnum( connection_struct *conn, uint16 vuid,
 		if (!(lp_browseable(i) && lp_snum_ok(i))) {
 			continue;
 		}
+		if ((lp_parm_bool(i, "com.apple", "filter shares by access", False) == True) &&
+			(check_share_access(lp_pathname(i)) == False)) {
+		    DEBUG(10,("Marking service %s unbrowseable -  path = %s\n", lp_servicename(i), lp_pathname(i)));
+		    lp_set_browseable(i, False);
+		    continue;
+		}
+
 		push_ascii_fstring(servicename_dos, lp_servicename(i));
 		/* Maximum name length = 13. */
 		if( lp_browseable( i ) && lp_snum_ok( i ) && (strlen(servicename_dos) < 13)) {

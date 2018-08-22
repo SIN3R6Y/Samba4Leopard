@@ -190,13 +190,17 @@ static BOOL posix_fcntl_lock(files_struct *fsp, int op, SMB_OFF_T offset, SMB_OF
 	DEBUG(8,("posix_fcntl_lock %d %d %.0f %.0f %d\n",fsp->fh->fd,op,(double)offset,(double)count,type));
 
 	ret = SMB_VFS_LOCK(fsp,fsp->fh->fd,op,offset,count,type);
+	if (ret == False && errno == ENOTSUP) {
+		/* No locking available, our database is authoritative. */
+		return False;
+	}
 
 	if (!ret && ((errno == EFBIG) || (errno == ENOLCK) || (errno ==  EINVAL))) {
 
 		DEBUG(0,("posix_fcntl_lock: WARNING: lock request at offset %.0f, length %.0f returned\n",
 					(double)offset,(double)count));
-		DEBUG(0,("an %s error. This can happen when using 64 bit lock offsets\n", strerror(errno)));
-		DEBUG(0,("on 32 bit NFS mounted file systems.\n"));
+		DEBUGADD(0,("an %s error. This can happen when using 64 bit lock offsets\n", strerror(errno)));
+		DEBUGADD(0,("on 32 bit NFS mounted file systems.\n"));
 
 		/*
 		 * If the offset is > 0x7FFFFFFF then this will cause problems on
@@ -235,13 +239,17 @@ static BOOL posix_fcntl_getlock(files_struct *fsp, SMB_OFF_T *poffset, SMB_OFF_T
 		fsp->fh->fd,(double)*poffset,(double)*pcount,*ptype));
 
 	ret = SMB_VFS_GETLOCK(fsp,fsp->fh->fd,poffset,pcount,ptype,&pid);
+	if (ret == False && errno == ENOTSUP) {
+		/* No locking available, our database is authoritative. */
+		return False;
+	}
 
 	if (!ret && ((errno == EFBIG) || (errno == ENOLCK) || (errno ==  EINVAL))) {
 
 		DEBUG(0,("posix_fcntl_getlock: WARNING: lock request at offset %.0f, length %.0f returned\n",
 					(double)*poffset,(double)*pcount));
-		DEBUG(0,("an %s error. This can happen when using 64 bit lock offsets\n", strerror(errno)));
-		DEBUG(0,("on 32 bit NFS mounted file systems.\n"));
+		DEBUGADD(0,("an %s error. This can happen when using 64 bit lock offsets\n", strerror(errno)));
+		DEBUGADD(0,("on 32 bit NFS mounted file systems.\n"));
 
 		/*
 		 * If the offset is > 0x7FFFFFFF then this will cause problems on
@@ -1061,13 +1069,17 @@ BOOL set_posix_lock_windows_flavour(files_struct *fsp,
 		DEBUG(5,("set_posix_lock_windows_flavour: Real lock: Type = %s: offset = %.0f, count = %.0f\n",
 			posix_lock_type_name(posix_lock_type), (double)offset, (double)count ));
 
-		if (!posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,posix_lock_type)) {
+		ret = posix_fcntl_lock(fsp,SMB_F_SETLK,offset,
+			count,posix_lock_type);
+		if (ret == False && errno != ENOTSUP) {
 			*errno_ret = errno;
 			DEBUG(5,("set_posix_lock_windows_flavour: Lock fail !: Type = %s: offset = %.0f, count = %.0f. Errno = %s\n",
 				posix_lock_type_name(posix_lock_type), (double)offset, (double)count, strerror(errno) ));
 			ret = False;
 			break;
 		}
+
+		ret = True;
 	}
 
 	if (!ret) {
@@ -1181,7 +1193,8 @@ BOOL release_posix_lock_windows_flavour(files_struct *fsp,
 		DEBUG(5,("release_posix_lock_windows_flavour: downgrading lock to READ: offset = %.0f, count = %.0f\n",
 			(double)offset, (double)count ));
 
-		if (!posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,F_RDLCK)) {
+		ret = posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,F_RDLCK);
+		if (ret == False && errno != ENOTSUP) {
 			DEBUG(0,("release_posix_lock_windows_flavour: downgrade of lock failed with error %s !\n", strerror(errno) ));
 			talloc_destroy(ul_ctx);
 			return False;
@@ -1192,6 +1205,7 @@ BOOL release_posix_lock_windows_flavour(files_struct *fsp,
 	 * Release the POSIX locks on the list of ranges returned.
 	 */
 
+	ret = True;
 	for(; ulist; ulist = ulist->next) {
 		offset = ulist->start;
 		count = ulist->size;
@@ -1200,7 +1214,9 @@ BOOL release_posix_lock_windows_flavour(files_struct *fsp,
 			(double)offset, (double)count ));
 
 		if (!posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,F_UNLCK)) {
-			ret = False;
+			if (errno != ENOTSUP) {
+				ret = False;
+			}
 		}
 	}
 
@@ -1245,6 +1261,10 @@ BOOL set_posix_lock_posix_flavour(files_struct *fsp,
 	}
 
 	if (!posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,posix_lock_type)) {
+		if (errno == ENOTSUP) {
+		    return True;
+		}
+
 		*errno_ret = errno;
 		DEBUG(5,("set_posix_lock_posix_flavour: Lock fail !: Type = %s: offset = %.0f, count = %.0f. Errno = %s\n",
 			posix_lock_type_name(posix_lock_type), (double)offset, (double)count, strerror(errno) ));
@@ -1334,7 +1354,9 @@ BOOL release_posix_lock_posix_flavour(files_struct *fsp,
 			(double)offset, (double)count ));
 
 		if (!posix_fcntl_lock(fsp,SMB_F_SETLK,offset,count,F_UNLCK)) {
-			ret = False;
+			if (errno != ENOTSUP) {
+				ret = False;
+			}
 		}
 	}
 

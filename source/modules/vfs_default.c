@@ -195,6 +195,11 @@ static int vfswrap_open(vfs_handle_struct *handle,  const char *fname,
 	START_PROFILE(syscall_open);
 	result = sys_open(fname, flags, mode);
 	END_PROFILE(syscall_open);
+
+	if (result != -1) {
+		fsp->is_sendfile_capable = lp_use_sendfile(SNUM(handle->conn));
+	}
+
 	return result;
 }
 
@@ -568,7 +573,7 @@ static int vfswrap_fchmod(vfs_handle_struct *handle, files_struct *fsp, int fd, 
 	return result;
 }
 
-static int vfswrap_chown(vfs_handle_struct *handle,  const char *path, uid_t uid, gid_t gid)
+static int vfswrap_chown(vfs_handle_struct *handle, const char *path, uid_t uid, gid_t gid)
 {
 	int result;
 
@@ -591,6 +596,16 @@ static int vfswrap_fchown(vfs_handle_struct *handle, files_struct *fsp, int fd, 
 	errno = ENOSYS;
 	return -1;
 #endif
+}
+
+static int vfswrap_lchown(vfs_handle_struct *handle, const char *path, uid_t uid, gid_t gid)
+{
+	int result;
+
+	START_PROFILE(syscall_lchown);
+	result = sys_lchown(path, uid, gid);
+	END_PROFILE(syscall_lchown);
+	return result;
 }
 
 static int vfswrap_chdir(vfs_handle_struct *handle,  const char *path)
@@ -643,6 +658,17 @@ static int vfswrap_ntimes(vfs_handle_struct *handle, const char *path, const str
 #endif
 	END_PROFILE(syscall_ntimes);
 	return result;
+}
+
+static int vfswrap_set_create_time(vfs_handle_struct *handle,  const char *path, time_t createtime)
+{
+	errno = ENOSYS;
+	return -1;
+}
+
+static BOOL vfswrap_get_preserved_name(vfs_handle_struct *handle,  const char *path, char * name)
+{
+	return False;
 }
 
 /*********************************************************************
@@ -911,6 +937,12 @@ static int vfswrap_chflags(vfs_handle_struct *handle, const char *path, int flag
 	errno = ENOSYS;
 	return -1;
 #endif
+}
+
+static int vfswrap_streaminfo(vfs_handle_struct *handle,  struct files_struct *fsp, const char *fname, char **names, size_t **sizes)
+{
+	errno = ENOSYS;
+	return -1;
 }
 
 static size_t vfswrap_fget_nt_acl(vfs_handle_struct *handle, files_struct *fsp, int fd, uint32 security_info, SEC_DESC **ppdesc)
@@ -1268,11 +1300,17 @@ static vfs_op_tuple vfs_default_ops[] = {
 	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_fchown),	SMB_VFS_OP_FCHOWN,
 	 SMB_VFS_LAYER_OPAQUE},
+	{SMB_VFS_OP(vfswrap_lchown),	SMB_VFS_OP_LCHOWN,
+	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_chdir),	SMB_VFS_OP_CHDIR,
 	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_getwd),	SMB_VFS_OP_GETWD,
 	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_ntimes),	SMB_VFS_OP_NTIMES,
+	 SMB_VFS_LAYER_OPAQUE},
+	{SMB_VFS_OP(vfswrap_set_create_time),	SMB_VFS_OP_SET_CREATE_TIME,
+	 SMB_VFS_LAYER_OPAQUE},
+	{SMB_VFS_OP(vfswrap_get_preserved_name),	SMB_VFS_OP_GET_PRESERVED_NAME,
 	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_ftruncate),	SMB_VFS_OP_FTRUNCATE,
 	 SMB_VFS_LAYER_OPAQUE},
@@ -1297,6 +1335,8 @@ static vfs_op_tuple vfs_default_ops[] = {
 	{SMB_VFS_OP(vfswrap_notify_watch),	SMB_VFS_OP_NOTIFY_WATCH,
 	 SMB_VFS_LAYER_OPAQUE},
 	{SMB_VFS_OP(vfswrap_chflags),	SMB_VFS_OP_CHFLAGS,
+	 SMB_VFS_LAYER_OPAQUE},
+	{SMB_VFS_OP(vfswrap_streaminfo),SMB_VFS_OP_STREAMINFO,
 	 SMB_VFS_LAYER_OPAQUE},
 
 	/* NT ACL operations. */

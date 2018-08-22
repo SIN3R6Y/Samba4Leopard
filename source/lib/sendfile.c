@@ -395,6 +395,66 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, SMB_OFF_T of
 	return count + hdr_len;
 }
 
+#elif defined(DARWIN_SENDFILE_API)
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+
+ssize_t sys_sendfile(int tofd, int fromfd,
+	    const DATA_BLOB *header, SMB_OFF_T offset, size_t count)
+{
+	struct sf_hdtr	sf_header = {0};
+	struct iovec	io_header = {0};
+
+	SMB_OFF_T	nwritten;
+	int		ret;
+
+	if (header) {
+		sf_header.headers = &io_header;
+		sf_header.hdr_cnt = 1;
+		io_header.iov_base = header->data;
+		io_header.iov_len = header->length;
+		sf_header.trailers = NULL;
+		sf_header.trl_cnt = 0;
+	}
+
+	while (count != 0) {
+
+		nwritten = count;
+		ret = sendfile(fromfd, tofd, offset, &nwritten, &sf_header, 0);
+		if (ret == -1 && errno != EINTR && errno != EAGAIN) {
+			/* Send failed, we are toast. */
+			return -1;
+		}
+
+		if (nwritten == 0) {
+			/* EOF of offset is after EOF. */
+			break;
+		}
+
+		if (sf_header.hdr_cnt) {
+			if (io_header.iov_len <= nwritten) {
+				/* Entire header was sent. */
+				sf_header.headers = NULL;
+				sf_header.hdr_cnt = 0;
+				nwritten -= io_header.iov_len;
+			} else {
+				/* Partial header was sent. */
+				io_header.iov_len -= nwritten;
+				io_header.iov_base =
+				    ((uint8_t *)io_header.iov_base) + nwritten;
+				nwritten = 0;
+			}
+		}
+
+		offset += nwritten;
+		count -= nwritten;
+	}
+
+	return nwritten;
+}
+
 #elif defined(AIX_SENDFILE_API)
 
 /* BEGIN AIX SEND_FILE */

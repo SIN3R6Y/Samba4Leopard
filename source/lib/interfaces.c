@@ -2,6 +2,7 @@
    Unix SMB/CIFS implementation.
    return a list of network interfaces
    Copyright (C) Andrew Tridgell 1998
+   Copyright (C) 2007 Apple Inc. All rights reserved.
    
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -82,6 +83,62 @@
 
 #include "interfaces.h"
 
+#ifdef HAVE_IFACE_GETIFADDRS
+
+#ifdef HAVE_IFADDRS_H
+#include <ifaddrs.h>
+#endif
+
+/* This works for modern BSD systems, including Mac OS X. */
+static int _get_interfaces(struct iface_struct *ifaces, int max_interfaces)
+{
+	struct ifaddrs *addrlist;
+	struct ifaddrs *addr;
+	int count = 0;
+
+	if (getifaddrs(&addrlist) == -1) {
+		return -1;
+	}
+
+	for (addr = addrlist; addr; addr = addr->ifa_next) {
+
+		if (addr->ifa_addr == NULL ||
+		    addr->ifa_netmask == NULL) {
+			continue;
+		}
+
+		if (addr->ifa_addr->sa_family != AF_INET) {
+			continue;
+		}
+
+		if (!(addr->ifa_flags & IFF_UP)) {
+			continue;
+		}
+
+#define SOCKADDR_TO_INADDR(sa) (((struct sockaddr_in *)sa)->sin_addr)
+
+		ifaces[count].ip = SOCKADDR_TO_INADDR(addr->ifa_addr);
+		ifaces[count].netmask = SOCKADDR_TO_INADDR(addr->ifa_netmask);
+
+#undef SOCKADDR_TO_INADDR(sa)
+
+		strncpy(ifaces[count].name, addr->ifa_name,
+			sizeof(ifaces[count].name) - 1);
+		ifaces[count].name[sizeof(ifaces[count].name) - 1] = 0;
+
+		if (++count >= max_interfaces) {
+			break;
+		}
+	}
+
+	freeifaddrs(addrlist);
+	return count;
+}
+
+#define _FOUND_IFACE_ANY
+#endif /* HAVE_IFACE_GETIFADDRS */
+
+
 #if HAVE_IFACE_IFCONF
 
 /* this works for Linux 2.2, Solaris 2.5, SunOS4, HPUX 10.20, OSF1
@@ -96,8 +153,8 @@ static int _get_interfaces(struct iface_struct *ifaces, int max_interfaces)
 {  
 	struct ifconf ifc;
 	char buff[8192];
-	int fd, i, n;
-	struct ifreq *ifr=NULL;
+	char current;
+	int fd;
 	int total = 0;
 	struct in_addr ipaddr;
 	struct in_addr nmask;
@@ -114,33 +171,52 @@ static int _get_interfaces(struct iface_struct *ifaces, int max_interfaces)
 		close(fd);
 		return -1;
 	} 
-
-	ifr = ifc.ifc_req;
   
-	n = ifc.ifc_len / sizeof(struct ifreq);
-
 	/* Loop through interfaces, looking for given IP address */
-	for (i=n-1;i>=0 && total < max_interfaces;i--) {
-		if (ioctl(fd, SIOCGIFADDR, &ifr[i]) != 0) {
+	for (current = buf;
+	     current < ifc.ifc_len && total < max_interfaces;) {
+		struct ifreq *ifr = (struct ifref *)current;
+
+		/* Point current to the next ifreq. The ifreq list is not
+		 * actually an array. The structures are packed in the buffer
+		 * and their size varies depending on the type of address, so
+		 * we have to look as the sockaddr length to figure it out.
+		 */
+#ifdef _SIZEOF_ADDR_IFREQ(ifr)
+		/* 4.4 BSD introduced sockaddr.sa_len which lets us figure out
+		 * the real size.
+		 */
+		current += _SIZEOF_ADDR_IFREQ(ifr);
+#else
+		/* Earlier systems should have a fixed size sockaddr. */
+		current += sizeof(struct ifreq);
+#endif
+
+		/* We only support IPv4. */
+		if (ifr->ifr_addr.sa_family != AF_INET) {
 			continue;
 		}
 
-		iname = ifr[i].ifr_name;
-		ipaddr = (*(struct sockaddr_in *)&ifr[i].ifr_addr).sin_addr;
-
-		if (ioctl(fd, SIOCGIFFLAGS, &ifr[i]) != 0) {
-			continue;
-		}  
-
-		if (!(ifr[i].ifr_flags & IFF_UP)) {
+		if (ioctl(fd, SIOCGIFADDR, ifr) != 0) {
 			continue;
 		}
 
-		if (ioctl(fd, SIOCGIFNETMASK, &ifr[i]) != 0) {
+		iname = ifr->ifr_name;
+		ipaddr = (*(struct sockaddr_in *)ifr->ifr_addr).sin_addr;
+
+		if (ioctl(fd, SIOCGIFFLAGS, ifr) != 0) {
 			continue;
 		}  
 
-		nmask = ((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr;
+		if (!(ifr->fr_flags & IFF_UP)) {
+			continue;
+		}
+
+		if (ioctl(fd, SIOCGIFNETMASK, ifr) != 0) {
+			continue;
+		}  
+
+		nmask = ((struct sockaddr_in *)ifr->fr_addr)->sin_addr;
 
 		strncpy(ifaces[total].name, iname, sizeof(ifaces[total].name)-1);
 		ifaces[total].name[sizeof(ifaces[total].name)-1] = 0;

@@ -70,7 +70,9 @@
 /* Changed to version 20, use ntimes call instead of utime (greater
  * timestamp resolition. JRA. */
 /* Changed to version21 to add chflags operation -- jpeach */
-#define SMB_VFS_INTERFACE_VERSION 21
+/* Changed to version22 to add lchown operation -- jra */
+/* Changed to version 23 to add the streaminfo call. -- jpeach */
+#define SMB_VFS_INTERFACE_VERSION 23
 
 
 /* to bug old modules which are trying to compile with the old functions */
@@ -145,9 +147,12 @@ typedef enum _vfs_op_type {
 	SMB_VFS_OP_FCHMOD,
 	SMB_VFS_OP_CHOWN,
 	SMB_VFS_OP_FCHOWN,
+	SMB_VFS_OP_LCHOWN,
 	SMB_VFS_OP_CHDIR,
 	SMB_VFS_OP_GETWD,
 	SMB_VFS_OP_NTIMES,
+	SMB_VFS_OP_SET_CREATE_TIME,
+	SMB_VFS_OP_GET_PRESERVED_NAME,
 	SMB_VFS_OP_FTRUNCATE,
 	SMB_VFS_OP_LOCK,
 	SMB_VFS_OP_KERNEL_FLOCK,
@@ -160,6 +165,7 @@ typedef enum _vfs_op_type {
 	SMB_VFS_OP_REALPATH,
 	SMB_VFS_OP_NOTIFY_WATCH,
 	SMB_VFS_OP_CHFLAGS,
+	SMB_VFS_OP_STREAMINFO,
 
 	/* NT ACL operations. */
 
@@ -271,9 +277,12 @@ struct vfs_ops {
 		int (*fchmod)(struct vfs_handle_struct *handle, struct files_struct *fsp, int fd, mode_t mode);
 		int (*chown)(struct vfs_handle_struct *handle, const char *path, uid_t uid, gid_t gid);
 		int (*fchown)(struct vfs_handle_struct *handle, struct files_struct *fsp, int fd, uid_t uid, gid_t gid);
+		int (*lchown)(struct vfs_handle_struct *handle, const char *path, uid_t uid, gid_t gid);
 		int (*chdir)(struct vfs_handle_struct *handle, const char *path);
 		char *(*getwd)(struct vfs_handle_struct *handle, char *buf);
 		int (*ntimes)(struct vfs_handle_struct *handle, const char *path, const struct timespec ts[2]);
+		int (*set_create_time)(struct vfs_handle_struct *handle, const char *path, time_t times);
+		BOOL (*get_preserved_name)(struct vfs_handle_struct *handle, const char *path, char * name);
 		int (*ftruncate)(struct vfs_handle_struct *handle, struct files_struct *fsp, int fd, SMB_OFF_T offset);
 		BOOL (*lock)(struct vfs_handle_struct *handle, struct files_struct *fsp, int fd, int op, SMB_OFF_T offset, SMB_OFF_T count, int type);
 		int (*kernel_flock)(struct vfs_handle_struct *handle, struct files_struct *fsp, int fd, uint32 share_mode);
@@ -292,6 +301,8 @@ struct vfs_ops {
 							  struct notify_event *ev),
 					 void *private_data, void *handle_p);
 		int (*chflags)(struct vfs_handle_struct *handle, const char *path, uint flags);
+		int (*streaminfo)(struct vfs_handle_struct *handle, struct files_struct *fsp,
+				    const char *fname, char **names, size_t **sizes);
 		
 		/* NT ACL operations. */
 		
@@ -395,9 +406,12 @@ struct vfs_ops {
 		struct vfs_handle_struct *fchmod;
 		struct vfs_handle_struct *chown;
 		struct vfs_handle_struct *fchown;
+		struct vfs_handle_struct *lchown;
 		struct vfs_handle_struct *chdir;
 		struct vfs_handle_struct *getwd;
 		struct vfs_handle_struct *ntimes;
+		struct vfs_handle_struct *set_create_time;
+		struct vfs_handle_struct *get_preserved_name;
 		struct vfs_handle_struct *ftruncate;
 		struct vfs_handle_struct *lock;
 		struct vfs_handle_struct *kernel_flock;
@@ -410,6 +424,7 @@ struct vfs_ops {
 		struct vfs_handle_struct *realpath;
 		struct vfs_handle_struct *notify_watch;
 		struct vfs_handle_struct *chflags;
+		struct vfs_handle_struct *streaminfo;
 
 		/* NT ACL operations. */
 
@@ -554,14 +569,25 @@ typedef struct vfs_statvfs_struct {
 	SMB_BIG_UINT FsIdentifier;   /* fsid */
 	/* NB Namelen comes from FILE_SYSTEM_ATTRIBUTE_INFO call */
 	/* NB flags can come from FILE_SYSTEM_DEVICE_INFO call   */
+
+	int FsCapabilities;
 } vfs_statvfs_struct;
 
+/* Add a new FSP extension of the given type. Returns a pointer to the
+ * extenstion data.
+ */
 #define VFS_ADD_FSP_EXTENSION(handle, fsp, type) \
     vfs_add_fsp_extension_notype(handle, (fsp), sizeof(type))
 
+/* Return a pointer to the existing FSP extension data. */
 #define VFS_FETCH_FSP_EXTENSION(handle, fsp) \
     vfs_fetch_fsp_extension(handle, (fsp))
 
+/* Return the talloc context associated with an FSP extension. */
+#define VFS_MEMCTX_FSP_EXTENSION(handle, fsp) \
+    vfs_memctx_fsp_extension(handle, (fsp))
+
+/* Remove and destroy an FSP extension. */
 #define VFS_REMOVE_FSP_EXTENSION(handle, fsp) \
     vfs_remove_fsp_extension((handle), (fsp))
 

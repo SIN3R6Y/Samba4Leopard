@@ -51,8 +51,9 @@
 	if (ret <= 0) return ret;
 
 	/* now we have the string in unix format, convert it to the display
-	   charset, but beware of it growing */
-	maxlen = ret*2;
+	   charset, but beware of it growing.
+	   Add tailing null byte when calculating maxlen. */
+	maxlen = (ret + 1) * 2;
 again:
 	p2 = (char *)SMB_MALLOC(maxlen);
 	if (!p2) {

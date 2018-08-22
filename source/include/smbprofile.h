@@ -22,6 +22,16 @@
 
 */
 
+#include "smbkdebug.h"
+
+#ifndef KDEBUG_TRACE_START
+#define KDEBUG_TRACE_START(traceid)
+#endif
+
+#ifndef KDEBUG_TRACE_END
+#define KDEBUG_TRACE_END(traceid)
+#endif
+
 /* this file defines the profile structure in the profile shared
    memory area */
 
@@ -143,6 +153,10 @@ enum profile_stats_values
 	PR_VALUE_SYSCALL_FCHOWN,
 #define syscall_fchown_count __profile_stats_value(PR_VALUE_SYSCALL_FCHOWN, count)
 #define syscall_fchown_time __profile_stats_value(PR_VALUE_SYSCALL_FCHOWN, time)
+
+	PR_VALUE_SYSCALL_LCHOWN,
+#define syscall_lchown_count __profile_stats_value(PR_VALUE_SYSCALL_LCHOWN, count)
+#define syscall_lchown_time __profile_stats_value(PR_VALUE_SYSCALL_LCHOWN, time)
 
 	PR_VALUE_SYSCALL_CHDIR,
 #define syscall_chdir_count __profile_stats_value(PR_VALUE_SYSCALL_CHDIR, count)
@@ -713,7 +727,7 @@ enum profile_stats_values
 #define election_count __profile_stats_value(PR_VALUE_ELECTION, count)
 #define election_time __profile_stats_value(PR_VALUE_ELECTION, time)
 
-	/* This mist remain the last value. */
+	/* This must remain the last value. */
 	PR_VALUE_MAX
 }; /* enum profile_stats_values */
 
@@ -827,6 +841,7 @@ static inline SMB_BIG_UINT profile_timestamp(void)
 
 #define START_PROFILE(x) \
 	SMB_BIG_UINT __profstamp_##x = 0; \
+	KDEBUG_TRACE_START(kdebug_##x); \
 	if (do_profile_flag) { \
 		__profstamp_##x = do_profile_times ? profile_timestamp() : 0;\
 		INC_PROFILE_COUNT(x##_count); \
@@ -834,6 +849,7 @@ static inline SMB_BIG_UINT profile_timestamp(void)
 
 #define START_PROFILE_BYTES(x,n) \
 	SMB_BIG_UINT __profstamp_##x = 0; \
+	KDEBUG_TRACE_START(kdebug_##x); \
 	if (do_profile_flag) { \
 		__profstamp_##x = do_profile_times ? profile_timestamp() : 0;\
 		INC_PROFILE_COUNT(x##_count); \
@@ -841,6 +857,7 @@ static inline SMB_BIG_UINT profile_timestamp(void)
   	}
 
 #define END_PROFILE(x) \
+	KDEBUG_TRACE_END(kdebug_##x); \
 	if (do_profile_times) { \
 		ADD_PROFILE_COUNT(x##_time, \
 		    profile_timestamp() - __profstamp_##x); \
@@ -858,5 +875,37 @@ static inline SMB_BIG_UINT profile_timestamp(void)
 #define END_PROFILE(x)
 
 #endif /* WITH_PROFILE */
+
+/*
+*	The following are used to maintain
+*	a count of the number of operations (requests) invoked
+*	and a countt of bytes transmitted/received
+*/
+#ifdef WITH_DARWIN_STATS
+#define SERV_STAT_SHMEM_KEY ((key_t)0x60022006)
+u_int64_t user_op_count;
+u_int64_t user_byte_count;
+
+typedef struct service_stats {
+	u_int64_t op_count;
+	u_int64_t byte_count;
+}service_stats;
+typedef struct service_header {
+	int count;
+	service_stats service_detail[1];
+} service_header;
+extern service_header *service_h;
+extern service_stats *service_c;
+#define INC_OP_COUNT(s) \
+	if ((int32_t)s >= 0 && s < service_h->count) { \
+		user_op_count++; \
+		service_c[s].op_count++; \
+	}
+#define INC_BYTE_COUNT(s, n) \
+	if ((int32_t)s >= 0 && s < service_h->count && n > 0) { \
+		user_byte_count += n; \
+		service_c[s].byte_count += n; \
+	}
+#endif /*WITH_DARWIN_STATS*/
 
 #endif

@@ -261,6 +261,19 @@ BOOL asn1_read_uint8(ASN1_DATA *data, uint8 *v)
 	return asn1_read(data, v, 1);
 }
 
+/*
+ * Check thta the value of the ASN1 buffer at the current offset equals tag.
+ */
+BOOL asn1_check_tag(ASN1_DATA *data, uint8 tag)
+{
+	if (data->has_error || data->ofs >= data->length || data->ofs < 0) {
+		data->has_error = True;
+		return False;
+	}
+
+	return (tag == data->data[data->ofs]);
+}
+
 /* start reading a nested asn1 structure */
 BOOL asn1_start_tag(ASN1_DATA *data, uint8 tag)
 {

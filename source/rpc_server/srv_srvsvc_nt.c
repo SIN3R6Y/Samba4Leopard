@@ -469,8 +469,15 @@ static BOOL init_srv_share_info_ctr(pipes_struct *p, SRV_SHARE_INFO_CTR *ctr,
 
 	/* Count the number of entries. */
 	for (snum = 0; snum < num_services; snum++) {
-		if (lp_browseable(snum) && lp_snum_ok(snum) && (all_shares || !is_hidden_share(snum)) )
+		if (lp_browseable(snum) && lp_snum_ok(snum) && (all_shares || !is_hidden_share(snum)) ) {
+		    if ((lp_parm_bool(snum, "com.apple", "filter shares by access", False) == False) ||
+		    	(check_share_access(lp_pathname(snum)) == True))
 			num_entries++;
+		    else {
+			DEBUG(10,("Marking service %s unbrowseable - path = %s\n", lp_servicename(snum), lp_pathname(snum)));
+			lp_set_browseable(snum, False);
+		    }
+		}
 	}
 
 	*total_entries = num_entries;

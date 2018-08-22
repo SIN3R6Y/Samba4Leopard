@@ -33,6 +33,9 @@ static BOOL read_only;
 clockid_t __profile_clock;
 BOOL have_profiling_clock = False;
 #endif
+#if defined(WITH_KDEBUG_TRACE)
+unsigned int kdebug_enable; /* Should match declaration in sys/kdebug.h */
+#endif
 #endif
 
 struct profile_header *profile_h;
@@ -51,11 +54,13 @@ void set_profile_level(int level, struct process_id src)
 	case 0:		/* turn off profiling */
 		do_profile_flag = False;
 		do_profile_times = False;
+		kdebug_enable = False;
 		DEBUG(1,("INFO: Profiling turned OFF from pid %d\n",
 			 (int)procid_to_pid(&src)));
 		break;
 	case 1:		/* turn on counter profiling only */
 		do_profile_flag = True;
+		kdebug_enable = True;
 		do_profile_times = False;
 		DEBUG(1,("INFO: Profiling counts turned ON from pid %d\n",
 			 (int)procid_to_pid(&src)));
@@ -74,6 +79,7 @@ void set_profile_level(int level, struct process_id src)
 		}
 #endif
 
+		kdebug_enable = True;
 		do_profile_flag = True;
 		do_profile_times = True;
 		DEBUG(1,("INFO: Full profiling turned ON from pid %d\n",
@@ -439,3 +445,73 @@ BOOL profile_setup(BOOL rdonly)
 }
 
 #endif /* WITH_PROFILE */
+
+#ifdef WITH_DARWIN_STATS
+# ifndef IPC_PERMS
+#define IPC_PERMS ((SHM_R | SHM_W) | (SHM_R>>3) | (SHM_R>>6))
+#endif
+struct service_header *service_h;
+struct service_stats *service_c;
+static int service_stat_shm_id;
+static BOOL stat_read_only;
+BOOL service_stats_setup(BOOL rdonly)
+{
+	int size = 0;
+	int count = 0;
+	struct shmid_ds shm_ds;
+	stat_read_only = rdonly;
+ again:
+	count = lp_numservices();
+	size = (sizeof(service_stats) * count) + sizeof(int);
+	/* try to use an existing key */
+	service_stat_shm_id = shmget(SERV_STAT_SHMEM_KEY, 0, 0);
+	/* if that failed then create one. There is a race condition here
+	   if we are running from inetd. Bad luck. */
+	if (service_stat_shm_id == -1) {
+		if (stat_read_only)
+			return False;
+		service_stat_shm_id = shmget(SERV_STAT_SHMEM_KEY,
+									size,
+									IPC_CREAT | IPC_EXCL | IPC_PERMS);
+		if (service_stat_shm_id == -1) {
+			DEBUG(0,("Can't create or use IPC area. Error was %s\n",
+					strerror(errno)));
+			return False;
+		}
+	}
+	service_h = (service_header *)shmat(service_stat_shm_id, 0,
+										stat_read_only?SHM_RDONLY:0);
+
+	if ((long)service_h == -1) {
+		DEBUG(0,("Can't attach to IPC area. Error was %s\n",
+			 strerror(errno)));
+		return False;
+	}
+	/* find out who created this memory area */
+	if (shmctl(service_stat_shm_id, IPC_STAT, &shm_ds) != 0) {
+		DEBUG(0,("ERROR shmctl : can't IPC_STAT. Error was %s\n",
+			 strerror(errno)));
+		return False;
+	}
+	if (shm_ds.shm_perm.cuid != sec_initial_uid() || shm_ds.shm_perm.cgid != sec_initial_gid()) {
+		DEBUG(0,("ERROR: we did not create the shmem (owned by another user)\n"));
+		return False;
+	}
+	if (shm_ds.shm_segsz < size) {
+		DEBUG(0,("WARNING: service_stat struct size is %d (expected %d). Deleting\n",
+			 (int)shm_ds.shm_segsz, size));
+		if (shmctl(service_stat_shm_id, IPC_RMID, &shm_ds) == 0)
+			goto again;
+		else
+			return False;
+	}
+	if (!stat_read_only && (shm_ds.shm_nattch == 1)) {
+		memset((char *)service_h, 0, size);
+		service_h->count = count;
+		DEBUG(3,("Initialised service stats area\n"));
+	}
+	service_c = &service_h->service_detail[0];
+	return True;
+}
+
+#endif /*WITH_DARWIN_STATS*/

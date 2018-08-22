@@ -42,6 +42,7 @@
 #define MSG_REQ_DMALLOC_LOG_CHANGED	12
 
 #define MSG_SHUTDOWN		13
+#define MSG_USR_STATS 14
 
 /* nmbd messages */
 #define MSG_FORCE_ELECTION 1001

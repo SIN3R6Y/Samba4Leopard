@@ -4330,6 +4330,18 @@ BOOL can_access_file(connection_struct *conn, const char *fname, SMB_STRUCT_STAT
 		}
 	}
 
+#if defined(HAVE_STAT_ST_FLAGS)
+#if defined(UF_IMMUTABLE) && defined(SF_IMMUTABLE)
+
+	if (access_mask & FILE_WRITE_DATA) {
+		if (psbuf->st_flags & (UF_IMMUTABLE | SF_IMMUTABLE)) {
+			return False;
+		}
+	}
+
+#endif
+#endif
+
 	/* Check primary owner access. */
 	if (current_user.ut.uid == psbuf->st_uid) {
 		switch (access_mask) {

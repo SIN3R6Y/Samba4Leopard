@@ -87,6 +87,39 @@ static void creds_init_128(struct dcinfo *dc,
 	memcpy(dc->seed_chal.data, dc->clnt_chal.data, 8);
 }
 
+/* In the OpenDirectory case, DirectoryService has already provided us
+ * the generated session key because we can't get at the trust account
+ * password hash.
+ */
+static void creds_init_64_od(struct dcinfo *dc,
+			const DOM_CHAL *clnt_chal_in,
+			const DOM_CHAL *srv_chal_in,
+			const unsigned char mach_pw[16])
+{
+	SMB_ASSERT(lp_opendirectory());
+
+	/* debug output */
+	DEBUG(5,("creds_init_64\n"));
+	DEBUG(5,("\tclnt_chal_in: %s\n", credstr(clnt_chal_in->data)));
+	DEBUG(5,("\tsrv_chal_in : %s\n", credstr(srv_chal_in->data)));
+	DEBUG(5,("\tsess_key_out : %s\n", credstr(dc->sess_key)));
+
+	/* Generate the next client and server creds. */
+
+	des_crypt112(dc->clnt_chal.data,		/* output */
+			clnt_chal_in->data,		/* input */
+			dc->sess_key,			/* input */
+			1);
+
+	des_crypt112(dc->srv_chal.data,			/* output */
+			srv_chal_in->data,		/* input */
+			dc->sess_key,			/* input */
+			1);
+
+	/* Seed is the client chal. */
+	memcpy(dc->seed_chal.data, dc->clnt_chal.data, 8);
+}
+
 /****************************************************************************
  Setup the session key and the client and server creds in dc.
  Used by both client and server creds setup.
@@ -193,10 +226,13 @@ void creds_server_init(uint32 neg_flags,
 			srv_chal,
 			mach_pw);
 	} else {
-		creds_init_64(dc,
-			clnt_chal,
-			srv_chal,
-			mach_pw);
+		if (lp_opendirectory()) {
+			creds_init_64_od(dc, clnt_chal,
+				srv_chal, mach_pw);
+		} else {
+			creds_init_64(dc, clnt_chal,
+				srv_chal, mach_pw);
+		}
 	}
 
 	dump_data_pw("creds_server_init: session key", dc->sess_key, 16);

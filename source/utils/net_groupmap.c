@@ -273,17 +273,15 @@ static int net_groupmap_add(int argc, const char **argv)
 		return -1;
 	}
 	
-	if ( (gid = nametogid(unixgrp)) == (gid_t)-1 ) {
+	if (!nametogid(unixgrp, &gid)) {
 		d_fprintf(stderr, "Can't lookup UNIX group %s\n", unixgrp);
 		return -1;
 	}
 
-	{
-		if (pdb_getgrgid(&map, gid)) {
-			d_printf("Unix group %s already mapped to SID %s\n",
-				 unixgrp, sid_string_static(&map.sid));
-			return -1;
-		}
+	if (pdb_getgrgid(&map, gid)) {
+		d_printf("Unix group %s already mapped to SID %s\n",
+			 unixgrp, sid_string_static(&map.sid));
+		return -1;
 	}
 	
 	if ( (rid == 0) && (string_sid[0] == '\0') ) {
@@ -448,8 +446,7 @@ static int net_groupmap_modify(int argc, const char **argv)
 		fstrcpy( map.nt_name, ntgroup );
 		
 	if ( unixgrp[0] ) {
-		gid = nametogid( unixgrp );
-		if ( gid == -1 ) {
+		if ( !nametogid( unixgrp, &gid ) ) {
 			d_fprintf(stderr, "Unable to lookup UNIX group %s.  Make sure the group exists.\n",
 				unixgrp);
 			return -1;

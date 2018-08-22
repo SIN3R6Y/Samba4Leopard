@@ -2432,7 +2432,7 @@ SMB_OFF_T conv_str_size(const char * str)
 		 * 4-byte SMB_OFF_T. It's better to let the caller handle
 		 * a failure than some random number.
 		 */
-		if (lval_orig <= lval) {
+		if (lval <= lval_orig) {
 			return 0;
 		}
         }

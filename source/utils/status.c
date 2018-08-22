@@ -44,6 +44,7 @@ static int            shares_only = 0;            /* Added by RJS */
 static int            locks_only  = 0;            /* Added by RJS */
 static BOOL processes_only=False;
 static int show_brl;
+static int show_counts = 0;
 static BOOL numeric_only = False;
 
 const char *username = NULL;
@@ -240,7 +241,131 @@ static int traverse_sessionid(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA dbuf, vo
 	return 0;
 }
 
+#ifdef WITH_DARWIN_STATS
+u_int64_t buffer[3];
+int num_replies;
 
+
+static BOOL send_status_message(struct process_id pid)
+{
+	TDB_CONTEXT *tdb;
+	BOOL ret;
+	int n_sent = 0;
+
+	if (!message_init())
+		return False;
+
+	if (procid_to_pid(&pid) != 0) {
+		return NT_STATUS_IS_OK(message_send_pid(pid, MSG_USR_STATS,
+				    NULL, 0, False /* duplicates */));
+	}
+
+	tdb = tdb_open_log(lock_path("connections.tdb"), 0,
+			   TDB_DEFAULT, O_RDWR, 0);
+	if (!tdb) {
+		fprintf(stderr,"Failed to open connections database"
+			": %s\n", strerror(errno));
+		return False;
+	}
+
+	ret = message_send_all(tdb, MSG_USR_STATS, NULL, 0,
+				False /* duplicates */, &n_sent);
+	DEBUG(10,("smbcontrol/send_message: broadcast message to "
+		  "%d processes\n", n_sent));
+	tdb_close(tdb);
+	return ret;
+}
+static void wait_replies(BOOL multiple_replies)
+{
+	time_t start_time = 0;
+
+	/* Wait around a bit.  This is pretty disgusting - we have to
+           busy-wait here as there is no nicer way to do it. */
+
+	do {
+		start_time = time(NULL);
+		message_dispatch();
+		if (num_replies > 0 && !multiple_replies)
+			break;
+		do
+			sleep(1);
+		while ((5 + start_time - time(NULL)) > 0 && num_replies == 0);
+		if (num_replies > 0 && !multiple_replies)
+			break;
+	} while (1);
+}
+
+static void handle_usr_stat_reply(int msg_type, struct process_id pid,
+		    void *buf, size_t len, void * UNUSED(context))
+{
+	//DEBUG(10,("handle_usr_stat_reply from %d size %d\n ", pid, len ));
+	d_printf("   %-21qu%-21qu\n", ((u_int64_t*)buf)[0], ((u_int64_t*)buf)[1]);
+	num_replies++;
+}
+
+static void do_collect_usrstat(struct process_id pid)
+{
+	num_replies = 0;
+	if  (send_status_message(pid)) {
+		wait_replies(0);
+	}
+}
+
+static int traverse_processes(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA dbuf, void *state)
+{
+	struct sessionid sessionid;
+	struct process_id pid;
+
+	if (dbuf.dsize != sizeof(sessionid))
+		return 0;
+	memcpy(&sessionid, dbuf.dptr, sizeof(sessionid));
+
+	pid = pid_to_procid((pid_t)sessionid.pid);
+	if (!process_exists(pid)) {
+		return 0;
+	}
+	Ucrit_addPid( sessionid.pid );
+	d_printf("%5d   %-12s  %-12s",
+	       (int)sessionid.pid, uidtoname(sessionid.uid), gidtoname(sessionid.gid));
+	do_collect_usrstat(pid);
+	return 0;
+}
+
+static void dump_user_stats(void)
+{
+	TDB_CONTEXT *tdb;
+	int nump = 0;
+	message_register(MSG_USR_STATS, handle_usr_stat_reply, NULL);
+	tdb = tdb_open_log(lock_path("sessionid.tdb"), 0, TDB_DEFAULT, O_RDONLY, 0);
+	if (!tdb) {
+		d_printf("\nsessionid.tdb not initialised\n");
+	} else {
+		d_printf("\nPID     Username      Group         OpCount              ByteCount            \n");
+		d_printf("------------------------------------------------------------------------------\n");
+		nump = tdb_traverse(tdb, traverse_processes, NULL);
+		//DEBUG(10,("Total %d procs traversed\n", nump));
+		tdb_close(tdb);
+	}
+	message_deregister(MSG_USR_STATS);
+}
+
+static void dump_service_stats(void)
+{
+	int is = 0;
+
+	if (service_stats_setup(True) && service_h->count > 0) {
+		d_printf("\n%-15s %-21s%-21s\n", "Share", "OpCount", "ByteCount");
+		d_printf("-------------------------------------------------------------------\n");
+		for (is = 0;  is < service_h->count && lp_const_servicename(is); is++)
+			d_printf("%-15s %-21qu %-21qu\n",
+						lp_servicename(is),
+						service_c[is].op_count,
+						service_c[is].byte_count);
+	} else {
+		fprintf(stderr,"\nFailed to initialise service_stats memory\n");
+	}
+}
+#endif /*WITH_DARWIN_STATS*/
 
 
  int main(int argc, char *argv[])
@@ -262,6 +387,7 @@ static int traverse_sessionid(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA dbuf, vo
 		{"profile-rates", 'R', POPT_ARG_NONE, NULL, 'R', "Show call rates" },
 		{"byterange",	'B', POPT_ARG_NONE,	&show_brl, 'B', "Include byte range locks"},
 		{"numeric",	'n', POPT_ARG_NONE,	&numeric_only, 'n', "Numeric uid/gid"},
+		{"counts",	'C', POPT_ARG_NONE,	&show_counts, 'n', "Show all user op/bytes counts"},
 		POPT_COMMON_SAMBA
 		POPT_TABLEEND
 	};
@@ -338,6 +464,14 @@ static int traverse_sessionid(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA dbuf, vo
 			exit(0);	
 	}
   
+#if WITH_DARWIN_STATS
+	if ( show_counts) {
+		dump_user_stats();
+		dump_service_stats();
+		exit(0);
+	}
+#endif /*WITH_DARWIN_STATS*/
+
 	if ( show_shares ) {
 		tdb = tdb_open_log(lock_path("connections.tdb"), 0, TDB_DEFAULT, O_RDONLY, 0);
 		if (!tdb) {

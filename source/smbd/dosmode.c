@@ -152,6 +152,15 @@ static uint32 dos_mode_from_sbuf(connection_struct *conn, const char *path, SMB_
 	int result = 0;
 	enum mapreadonly_options ro_opts = (enum mapreadonly_options)lp_map_readonly(SNUM(conn));
 
+#if defined(HAVE_STAT_ST_FLAGS) && defined(UF_IMMUTABLE) && defined(SF_IMMUTABLE)
+	/* We should check the immutable bit irrespective of which MAP_READONLY
+	 * mode we are in.
+	 */
+	if (sbuf->st_flags & (UF_IMMUTABLE | SF_IMMUTABLE)) {
+		result |= aRONLY;
+	}
+
+#else
 	if (ro_opts == MAP_READONLY_YES) {
 		/* Original Samba method - map inverse of user "w" bit. */
 		if ((sbuf->st_mode & S_IWUSR) == 0) {
@@ -163,16 +172,57 @@ static uint32 dos_mode_from_sbuf(connection_struct *conn, const char *path, SMB_
 			result |= aRONLY;
 		}
 	} /* Else never set the readonly bit. */
+#endif
 
-	if (MAP_ARCHIVE(conn) && ((sbuf->st_mode & S_IXUSR) != 0))
+#if defined(HAVE_STAT_ST_FLAGS)
+	/* The archived bit really only makes sense for regular files. Some
+	 * systems hijack it for different purposes on directories anyway, so
+	 * it is best avoided.
+	 */
+	if (S_ISREG(sbuf->st_mode)) {
 		result |= aARCH;
 
-	if (MAP_SYSTEM(conn) && ((sbuf->st_mode & S_IXGRP) != 0))
+#if defined(SF_ARCHIVED)
+		/* aARCH means "needs to be archived", but SF_ARCHIVED
+		 * means "was already archived", so we invert the sense
+		 * here.
+		 */
+		if (sbuf->st_flags & SF_ARCHIVED) {
+			result &= ~aARCH;
+		}
+#endif
+#if defined(UF_NODUMP)
+		/* If a file is marked as not to be dumped (backed up), this
+		 * is approximately the same as marking it as already
+		 * having been backed up. The net effect is that any app
+		 * looking at these flags will figure it doesn't need to
+		 * be backed up.
+		 */
+		if (sbuf->st_flags & UF_NODUMP) {
+			result &= ~aARCH;
+		}
+#endif
+	}
+#else
+	if (MAP_ARCHIVE(conn) && ((sbuf->st_mode & S_IXUSR) != 0)) {
+		result |= aARCH;
+	}
+#endif
+
+	if ( MAP_SYSTEM(conn) && ((sbuf->st_mode & S_IXGRP) != 0)) {
 		result |= aSYSTEM;
+	}
 	
-	if (MAP_HIDDEN(conn) && ((sbuf->st_mode & S_IXOTH) != 0))
+#if defined(HAVE_STAT_ST_FLAGS) && defined(UF_HIDDEN)
+	if (sbuf->st_flags & UF_HIDDEN) {
+		result |= aHIDDEN;
+	}
+#else
+	if ( MAP_HIDDEN(conn) && ((sbuf->st_mode & S_IXOTH) != 0)) {
 		result |= aHIDDEN;   
-  
+	}
+#endif
+
 	if (S_ISDIR(sbuf->st_mode))
 		result = aDIR | (result & aRONLY);
 

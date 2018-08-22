@@ -46,6 +46,22 @@ struct commit_info
         SMB_OFF_T dthresh;	/* Dirty data threshold */
 };
 
+static void flush_fd_data(int fd)
+{
+#if defined(HAVE_FDATASYNC)
+	fdatasync(fd);
+#elif defined(HAVE_FSYNC)
+	fsync(fd);
+#else
+	/* Constantly emit an annoying message so the admin
+	 * will get the hint that this module isn't doing
+	 * anything.
+	 */
+	DEBUG(0, ("%s: WARNING: no commit support "
+		"on this platform\n", MODULE));
+#endif
+}
+
 static void commit_all(
         struct vfs_handle_struct *	handle,
         files_struct *		        fsp)
@@ -58,7 +74,7 @@ static void commit_all(
                                 ("%s: flushing %lu dirty bytes\n",
                                  MODULE, (unsigned long)c->dbytes));
 
-                        fdatasync(fsp->fh->fd);
+			flush_fd_data(fsp->fh->fd);
                         c->dbytes = 0;
                 }
         }
@@ -82,7 +98,7 @@ static void commit(
                                 ("%s: flushing %lu dirty bytes\n",
                                  MODULE, (unsigned long)c->dbytes));
 
-                        fdatasync(fsp->fh->fd);
+			flush_fd_data(fsp->fh->fd);
                         c->dbytes = 0;
                 }
         }

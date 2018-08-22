@@ -245,9 +245,8 @@ void set_sec_ctx(uid_t uid, gid_t gid, int ngroups, gid_t *groups, NT_USER_TOKEN
 
 	gain_root();
 
-#ifdef HAVE_SETGROUPS
-	sys_setgroups(ngroups, groups);
-#endif
+	become_gid(gid);
+	sys_setgroups(uid, ngroups, groups);
 
 	ctx_p->ut.ngroups = ngroups;
 
@@ -277,7 +276,7 @@ void set_sec_ctx(uid_t uid, gid_t gid, int ngroups, gid_t *groups, NT_USER_TOKEN
 		ctx_p->token = NULL;
 	}
 
-	become_id(uid, gid);
+	become_uid(uid);
 
 	ctx_p->ut.uid = uid;
 	ctx_p->ut.gid = gid;
@@ -338,11 +337,11 @@ BOOL pop_sec_ctx(void)
 
 	prev_ctx_p = &sec_ctx_stack[sec_ctx_stack_ndx];
 
-#ifdef HAVE_SETGROUPS
-	sys_setgroups(prev_ctx_p->ut.ngroups, prev_ctx_p->ut.groups);
-#endif
+	become_gid(prev_ctx_p->ut.gid);
+	sys_setgroups(prev_ctx_p->ut.uid,
+		prev_ctx_p->ut.ngroups, prev_ctx_p->ut.groups);
 
-	become_id(prev_ctx_p->ut.uid, prev_ctx_p->ut.gid);
+	become_uid(prev_ctx_p->ut.uid);
 
 	/* Update current_user stuff */
 

@@ -25,6 +25,7 @@
 /* This is the implementation of the netlogon pipe. */
 
 #include "includes.h"
+#include "opendirectory.h"
 
 extern userdom_struct current_user_info;
 
@@ -361,6 +362,7 @@ NTSTATUS _net_auth(pipes_struct *p, NET_Q_AUTH *q_u, NET_R_AUTH *r_u)
 	fstring remote_machine;
 	DOM_CHAL srv_chal_out;
 
+
 	if (!p->dc || !p->dc->challenge_sent) {
 		return NT_STATUS_ACCESS_DENIED;
 	}
@@ -370,7 +372,23 @@ NTSTATUS _net_auth(pipes_struct *p, NET_Q_AUTH *q_u, NET_R_AUTH *r_u)
 	rpcstr_pull(remote_machine, q_u->clnt_id.uni_comp_name.buffer,sizeof(fstring),
 				q_u->clnt_id.uni_comp_name.uni_str_len*2,0);
 
-	status = get_md4pw((char *)p->dc->mach_pw, mach_acct, q_u->clnt_id.sec_chan);
+	if (lp_opendirectory()) {
+		tDirStatus dirStatus;
+		become_root();
+		dirStatus = opendirectory_cred_session_key(&p->dc->clnt_chal,
+				&p->dc->srv_chal, mach_acct,
+				p->dc->sess_key);
+		unbecome_root();
+		DEBUG(4, ("_net_auth opendirectory_cred_session_key [%d]\n",
+				dirStatus));
+
+		status = (dirStatus == eDSNoErr) ? NT_STATUS_OK
+						 : NT_STATUS_UNSUCCESSFUL;
+	} else {
+		status = get_md4pw((char *)p->dc->mach_pw, mach_acct,
+				q_u->clnt_id.sec_chan);
+	}
+
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("_net_auth: creds_server_check failed. Failed to "
 			"get password for machine account %s "
@@ -454,7 +472,38 @@ NTSTATUS _net_auth_2(pipes_struct *p, NET_Q_AUTH_2 *q_u, NET_R_AUTH_2 *r_u)
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	status = get_md4pw((char *)p->dc->mach_pw, mach_acct, q_u->clnt_id.sec_chan);
+	if (lp_opendirectory()) {
+
+		/* XXX Open Directory doesn't support 128bit challenges yet. */
+		if (q_u->clnt_flgs.neg_flags & NETLOGON_NEG_128BIT) {
+			DEBUG(2, ("refusing NETLOGON_NEG_128BIT auth attempt\n"));
+			status = NT_STATUS_NOT_SUPPORTED;
+		} else {
+
+			//check acct_ctrl flags
+			tDirStatus dirStatus;
+			become_root();
+			dirStatus =
+			    opendirectory_cred_session_key(&p->dc->clnt_chal,
+					    &p->dc->srv_chal, mach_acct,
+					    p->dc->sess_key);
+			unbecome_root();
+			DEBUG(4, ("_net_auth_2: "
+				"opendirectory_cred_session_key [%d]\n",
+				    dirStatus));
+
+			/* FIXME: there should be a proper error mapping from
+			 * tDirStatus to NT_ERROR types -- jpeach
+			 */
+			status = (dirStatus == eDSNoErr) ? NT_STATUS_OK
+							: NT_STATUS_UNSUCCESSFUL;
+		}
+
+	} else {
+		status = get_md4pw((char *)p->dc->mach_pw, mach_acct,
+				q_u->clnt_id.sec_chan);
+	}
+
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("_net_auth2: failed to get machine password for "
 			"account %s: %s\n",
@@ -603,35 +652,52 @@ NTSTATUS _net_srv_pwset(pipes_struct *p, NET_Q_SRV_PWSET *q_u, NET_R_SRV_PWSET *
 		DEBUG(100,("%02X ", pwd[i]));
 	DEBUG(100,("\n"));
 
-	old_pw = pdb_get_nt_passwd(sampass);
+	if (lp_opendirectory()) {
+		tDirStatus dirStatus = eDSNullParameter;
 
-	if (old_pw && memcmp(pwd, old_pw, 16) == 0) {
-		/* Avoid backend modificiations and other fun if the 
-		   client changed the password to the *same thing* */
-
-		ret = True;
-	} else {
-
-		/* LM password should be NULL for machines */
-		if (!pdb_set_lanman_passwd(sampass, NULL, PDB_CHANGED)) {
-			TALLOC_FREE(sampass);
-			return NT_STATUS_NO_MEMORY;
-		}
-		
-		if (!pdb_set_nt_passwd(sampass, pwd, PDB_CHANGED)) {
-			TALLOC_FREE(sampass);
-			return NT_STATUS_NO_MEMORY;
-		}
-		
-		if (!pdb_set_pass_last_set_time(sampass, time(NULL), PDB_CHANGED)) {
-			TALLOC_FREE(sampass);
-			/* Not quite sure what this one qualifies as, but this will do */
-			return NT_STATUS_UNSUCCESSFUL; 
-		}
-		
 		become_root();
-		r_u->status = pdb_update_sam_account(sampass);
+		dirStatus =
+		    opendirectory_set_workstation_nthash(p->dc->mach_acct, pwd);
 		unbecome_root();
+
+		DEBUG(2, ("_net_srv_pwset "
+			"opendirectory_set_workstation_nthash [%d]\n",
+			dirStatus));
+		if (dirStatus != eDSNoErr) {
+			TALLOC_FREE(sampass);
+			return NT_STATUS_UNSUCCESSFUL;
+		}
+	} else {
+		old_pw = pdb_get_nt_passwd(sampass);
+
+		if (old_pw && memcmp(pwd, old_pw, 16) == 0) {
+			/* Avoid backend modificiations and other fun if the
+			   client changed the password to the *same thing* */
+
+			ret = True;
+		} else {
+
+			/* LM password should be NULL for machines */
+			if (!pdb_set_lanman_passwd(sampass, NULL, PDB_CHANGED)) {
+				TALLOC_FREE(sampass);
+				return NT_STATUS_NO_MEMORY;
+			}
+
+			if (!pdb_set_nt_passwd(sampass, pwd, PDB_CHANGED)) {
+				TALLOC_FREE(sampass);
+				return NT_STATUS_NO_MEMORY;
+			}
+
+		if (!pdb_set_pass_last_set_time(sampass, time(NULL), PDB_CHANGED)) {
+				TALLOC_FREE(sampass);
+				/* Not quite sure what this one qualifies as, but this will do */
+				return NT_STATUS_UNSUCCESSFUL;
+			}
+
+			become_root();
+			r_u->status = pdb_update_sam_account(sampass);
+			unbecome_root();
+		}
 	}
 
 	/* set up the LSA Server Password Set response */
@@ -964,14 +1030,11 @@ static NTSTATUS _net_sam_logon_internal(pipes_struct *p,
 	{
 		DOM_GID *gids = NULL;
 		const DOM_SID *user_sid = NULL;
-		const DOM_SID *group_sid = NULL;
 		DOM_SID domain_sid;
 		uint32 user_rid, group_rid; 
 
 		int num_gids = 0;
 		pstring my_name;
-		fstring user_sid_string;
-		fstring group_sid_string;
 		unsigned char user_session_key[16];
 		unsigned char lm_session_key[16];
 		unsigned char pipe_session_key[16];
@@ -983,28 +1046,14 @@ static NTSTATUS _net_sam_logon_internal(pipes_struct *p,
 		usr_info->ptr_user_info = 0;
 
 		user_sid = pdb_get_user_sid(sampw);
-		group_sid = pdb_get_group_sid(sampw);
 
-		if ((user_sid == NULL) || (group_sid == NULL)) {
-			DEBUG(1, ("_net_sam_logon: User without group or user SID\n"));
+		if ((user_sid == NULL)) {
+			DEBUG(1, ("_net_sam_logon: User without user SID\n"));
 			return NT_STATUS_UNSUCCESSFUL;
 		}
 
 		sid_copy(&domain_sid, user_sid);
 		sid_split_rid(&domain_sid, &user_rid);
-
-		if (!sid_peek_check_rid(&domain_sid, group_sid, &group_rid)) {
-			DEBUG(1, ("_net_sam_logon: user %s\\%s has user sid "
-				  "%s\n but group sid %s.\n"
-				  "The conflicting domain portions are not "
-				  "supported for NETLOGON calls\n", 	    
-				  pdb_get_domain(sampw),
-				  pdb_get_username(sampw),
-				  sid_to_string(user_sid_string, user_sid),
-				  sid_to_string(group_sid_string, group_sid)));
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-		
 		
 		if(server_info->login_server) {
 		        pstrcpy(my_name, server_info->login_server);

@@ -1593,25 +1593,43 @@ uid_t nametouid(const char *name)
  Convert a name to a gid_t if possible. Return -1 if not a group. 
 ********************************************************************/
 
-gid_t nametogid(const char *name)
+BOOL nametogid(const char *name, gid_t *gid)
 {
 	struct group *grp;
 	char *p;
 	gid_t g;
 
 	g = (gid_t)strtol(name, &p, 0);
-	if ((p != name) && (*p == '\0'))
-		return g;
+	if ((p != name) && (*p == '\0')) {
+		*gid = g;
+		return True;
+	}
 
 	grp = sys_getgrnam(name);
-	if (grp)
-		return(grp->gr_gid);
-	return (gid_t)-1;
+	if (grp) {
+		*gid = grp->gr_gid;
+		return True;
+	}
+	return False;
 }
 
 /*******************************************************************
  Something really nasty happened - panic !
 ********************************************************************/
+
+/*
+ * The following symbol is reference by Crash Reporter symbolicly
+ * (instead of through undefined references. To get strip(1) to know
+ * this symbol is not to be stripped it needs to have the
+ * REFERENCED_DYNAMICALLY bit (0x10) set.  This would have been done
+ * automaticly by ld(1) if this symbol were referenced through undefined
+ * symbols.
+ *
+ * NOTE: this is an unsupported interface and the CrashReporter team reserve
+ * the right to change it at any time.
+ */
+char *__crashreporter_info__ = NULL;
+asm(".desc ___crashreporter_info__, 0x10");
 
 void smb_panic(const char *const why)
 {
@@ -1645,6 +1663,13 @@ void smb_panic(const char *const why)
 			DEBUG(0, ("smb_panic(): action returned status %d\n",
 					  WEXITSTATUS(result)));
 	}
+
+	/* Get CrashReporter to stash the panic reason in the crash log. Note
+	 * that this is really a very broad hint, since some of the frameworks
+	 * may clobber this and we can crash in ways that don't go through
+	 * smb_panic.
+	 */
+	__crashreporter_info__ = why;
 
 	dump_core();
 }
@@ -2916,52 +2941,6 @@ BOOL unix_wild_match(const char *pattern, const char *string)
 		return True;
 
 	return unix_do_match(p2, s2);
-}
-
-/**********************************************************************
- Converts a name to a fully qualified domain name.
- Returns True if lookup succeeded, False if not (then fqdn is set to name)
-***********************************************************************/
-                                                                                                                                                   
-BOOL name_to_fqdn(fstring fqdn, const char *name)
-{
-	struct hostent *hp = sys_gethostbyname(name);
-
-	if ( hp && hp->h_name && *hp->h_name ) {
-		char *full = NULL;
-
-		/* find out if the fqdn is returned as an alias
-		 * to cope with /etc/hosts files where the first
-		 * name is not the fqdn but the short name */
-		if (hp->h_aliases && (! strchr_m(hp->h_name, '.'))) {
-			int i;
-			for (i = 0; hp->h_aliases[i]; i++) {
-				if (strchr_m(hp->h_aliases[i], '.')) {
-					full = hp->h_aliases[i];
-					break;
-				}
-			}
-		}
-		if (full && (StrCaseCmp(full, "localhost.localdomain") == 0)) {
-			DEBUG(1, ("WARNING: your /etc/hosts file may be broken!\n"));
-			DEBUGADD(1, ("    Specifing the machine hostname for address 127.0.0.1 may lead\n"));
-			DEBUGADD(1, ("    to Kerberos authentication problems as localhost.localdomain\n"));
-			DEBUGADD(1, ("    may end up being used instead of the real machine FQDN.\n"));
-			full = hp->h_name;
-		}
-			
-		if (!full) {
-			full = hp->h_name;
-		}
-
-		DEBUG(10,("name_to_fqdn: lookup for %s -> %s.\n", name, full));
-		fstrcpy(fqdn, full);
-		return True;
-	} else {
-		DEBUG(10,("name_to_fqdn: lookup for %s failed.\n", name));
-		fstrcpy(fqdn, name);
-		return False;
-	}
 }
 
 /**********************************************************************

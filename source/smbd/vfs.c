@@ -238,14 +238,26 @@ void vfs_remove_fsp_extension(vfs_handle_struct *handle, files_struct *fsp)
 	}
 }
 
-void *vfs_fetch_fsp_extension(vfs_handle_struct *handle, files_struct *fsp)
+void *vfs_memctx_fsp_extension(vfs_handle_struct *handle, files_struct *fsp)
 {
 	struct vfs_fsp_data *head;
 
 	for (head = fsp->vfs_extension; head; head = head->next) {
 		if (head->owner == handle) {
-			return EXT_DATA_AREA(head);
+			return head;
 		}
+	}
+
+	return NULL;
+}
+
+void *vfs_fetch_fsp_extension(vfs_handle_struct *handle, files_struct *fsp)
+{
+	struct vfs_fsp_data *head;
+
+	head = vfs_memctx_fsp_extension(handle, fsp);
+	if (head != NULL) {
+		return EXT_DATA_AREA(head);
 	}
 
 	return NULL;
@@ -262,9 +274,17 @@ BOOL smbd_vfs_init(connection_struct *conn)
 	const char **vfs_objects;
 	unsigned int i = 0;
 	int j = 0;
-	
+
 	/* Normal share - initialise with disk access functions */
 	vfs_init_default(conn);
+
+	/* Don't bother loading VFS for IPC or printer connections. VFS
+	 * modules only apply to disk shares.
+	 */
+	if (conn->ipc || conn->printer) {
+		return True;
+	}
+
 	vfs_objects = lp_vfs_objects(SNUM(conn));
 
 	/* Override VFS functions if 'vfs object' was not specified*/

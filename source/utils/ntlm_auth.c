@@ -1171,6 +1171,30 @@ static void manage_gss_spnego_request(enum stdio_helper_mode stdio_helper_mode,
 						   &principal, NULL, &ap_rep,
 						   &session_key);
 
+			if (!NT_STATUS_IS_OK(status)) {
+				DEBUG(4, ("manage_gss_spnego_request: %s for "
+					"managed realm '%s'\n",
+					nt_errstr(status), lp_realm()));
+			} else {
+			    goto skip_lkdc_verify;
+			}
+
+			status = ads_verify_ticket(mem_ctx,
+					lp_parm_const_string(GLOBAL_SECTION_SNUM,
+						    "com.apple", "lkdc realm", ""),
+					0, &request.negTokenInit.mechToken,
+					&principal, NULL, &ap_rep,
+					&session_key);
+
+
+			if (!NT_STATUS_IS_OK(status)) {
+				DEBUG(4, ("manage_gss_spnego_request: %s for "
+					"lkdc realm '%s'\n", nt_errstr(status),
+				    lp_parm_const_string(GLOBAL_SECTION_SNUM,
+					    "com.apple", "lkdc realm", "")));
+			}
+
+skip_lkdc_verify:
 			talloc_destroy(mem_ctx);
 
 			/* Now in "principal" we have the name we are

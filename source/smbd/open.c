@@ -1613,6 +1613,35 @@ NTSTATUS open_file_ntcreate(connection_struct *conn,
 			     open_access_mask);
 
 	if (!NT_STATUS_IS_OK(fsp_open)) {
+
+		/* Darwin BRLM will return EDEADLK if some other process
+		 * already has a conflicting share mode. In this case, we
+		 * do the deferred open dance again.
+		 */
+		if (file_existed && errno == EDEADLK &&
+    		    !(oplock_request & INTERNAL_OPEN_ONLY) &&
+    		    lp_defer_sharing_violations()) {
+			struct timeval timeout;
+			struct deferred_open_record state;
+			int timeout_usecs;
+
+			state.delayed_for_oplocks = False;
+			state.dev = dev;
+			state.inode = inode;
+
+			timeout_usecs = lp_parm_int(SNUM(conn),
+						"smbd","sharedelay",
+						SHARING_VIOLATION_USEC_WAIT);
+			timeout = timeval_set(0, timeout_usecs);
+
+			if (!request_timed_out(request_time, timeout)) {
+				defer_open(lck, request_time, timeout,
+					   &state);
+			}
+
+			fsp_open = NT_STATUS_SHARING_VIOLATION;
+		}
+
 		if (lck != NULL) {
 			TALLOC_FREE(lck);
 		}

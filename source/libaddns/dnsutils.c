@@ -35,17 +35,15 @@ static DNS_ERROR LabelList( TALLOC_CTX *mem_ctx,
 	const char *dot;
 
 	for (dot = name; *dot != '\0'; dot += 1) {
-		char c = *dot;
-
-		if (c == '.')
+		/* Don't bother checking for legal hostname characters here.
+		 * RFC 1034 says that the "preferred" syntax for a hostname
+		 * consists only of alphanumerics and '-'. I interpret the work
+		 * "preferred" as "throw it at the server and let it pick up
+		 * the pieces" --jpeach
+		 */
+		if (*dot == '.') {
 			break;
-
-		if (c == '-') continue;
-		if ((c >= 'a') && (c <= 'z')) continue;
-		if ((c >= 'A') && (c <= 'Z')) continue;
-		if ((c >= '0') && (c <= '9')) continue;
-
-		return ERROR_DNS_INVALID_NAME;
+		}
 	}
 
 	if ((dot - name) > 63) {

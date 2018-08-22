@@ -992,6 +992,8 @@ BOOL pdb_set_plaintext_passwd(struct samu *sampass, const char *plaintext)
 	if (!plaintext)
 		return False;
 
+if (!lp_opendirectory()) {
+
 	/* Calculate the MD4 hash (NT compatible) of the password */
 	E_md4hash(plaintext, new_nt_p16);
 
@@ -1010,6 +1012,8 @@ BOOL pdb_set_plaintext_passwd(struct samu *sampass, const char *plaintext)
 		if (!pdb_set_lanman_passwd (sampass, new_lanman_p16, PDB_CHANGED)) 
 			return False;
 	}
+
+} /* !lp_opendirectory() */
 
 	if (!pdb_set_plaintext_pw_only (sampass, plaintext, PDB_CHANGED)) 
 		return False;

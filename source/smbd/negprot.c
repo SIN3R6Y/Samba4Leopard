@@ -225,11 +225,31 @@ static DATA_BLOB negprot_spnego(void)
 	} else {
 		fstring myname;
 		char *host_princ_s = NULL;
-		name_to_fqdn(myname, global_myname());
+
+		const char * lkdc_realm =
+			lp_parm_talloc_string(GLOBAL_SECTION_SNUM,
+				"com.apple", "lkdc realm", NULL);
+
+		myname[0] = '\0';
+		get_mydnsfullname(myname);
 		strlower_m(myname);
-		asprintf(&host_princ_s, "cifs/%s@%s", myname, lp_realm());
+
+		/* If we have a LKDC, use it unless there is a managed realm
+		 * also configured. The managed realm should have precedence.
+		 */
+		if (lkdc_realm && (*lp_realm() == '\0' ||
+				strcmp(lkdc_realm, lp_realm()) == 0)) {
+			asprintf(&host_princ_s,
+				"cifs/%s@%s", lkdc_realm, lkdc_realm);
+		} else {
+			asprintf(&host_princ_s, "cifs/%s@%s",
+					myname, lp_realm());
+		}
+
 		blob = spnego_gen_negTokenInit(guid, OIDs_krb5, host_princ_s);
+
 		SAFE_FREE(host_princ_s);
+		TALLOC_FREE(lkdc_realm);
 	}
 
 	return blob;
@@ -259,7 +279,8 @@ static int reply_nt1(char *inbuf, char *outbuf)
 	if ( (SVAL(inbuf, smb_flg2) & FLAGS2_EXTENDED_SECURITY) &&
 		((SVAL(inbuf, smb_flg2) & FLAGS2_UNKNOWN_BIT4) == 0) ) 
 	{
-		if (get_remote_arch() != RA_SAMBA) {
+	    	/* Don't override the SAMBA or CIFSFS arch */
+		if ((get_remote_arch() != RA_SAMBA) && (get_remote_arch() != RA_CIFSFS)) {
 			set_remote_arch( RA_VISTA );
 		}
 	}

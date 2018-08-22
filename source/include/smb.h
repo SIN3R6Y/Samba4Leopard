@@ -536,6 +536,7 @@ typedef struct files_struct {
 	BOOL modified;
 	BOOL is_directory;
 	BOOL is_stat;
+	BOOL is_sendfile_capable;
 	BOOL aio_write_behind;
 	BOOL lockdb_clean;
 	BOOL initial_delete_on_close; /* Only set at NTCreateX if file was created. */
@@ -680,9 +681,13 @@ typedef struct connection_struct {
 	int num_files_open;
 	unsigned int num_smb_operations; /* Count of smb operations on this tree. */
 
+	/* Semantics requested by the client or forced by the server config. */
 	BOOL case_sensitive;
 	BOOL case_preserve;
 	BOOL short_case_preserve;
+
+	/* Semantics provided by the underlying filesystem. */
+	int fs_capabilities;
 
 	name_compare_entry *hide_list; /* Per-share list of files to return as hidden. */
 	name_compare_entry *veto_list; /* Per-share list of files to veto (never show). */

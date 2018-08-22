@@ -259,6 +259,9 @@ int send_nt_replies(char *outbuf, int bufsize, NTSTATUS nt_error,
 
 /****************************************************************************
  Is it an NTFS stream name ?
+ An NTFS file name is <path>.<extention>:<stream name>:<stream type>
+ $DATA can be used as both a stream name and a stream type. A missing stream
+ name or type implies $DATA.
 ****************************************************************************/
 
 BOOL is_ntfs_stream_name(const char *fname)
@@ -267,6 +270,63 @@ BOOL is_ntfs_stream_name(const char *fname)
 		return False;
 	}
 	return (strchr_m(fname, ':') != NULL) ? True : False;
+}
+
+/* Split a path name into filename and stream name components. Canonicalise
+ * such that an implicit $DATA token is always explicit. If the stream name
+ * resolved to the data stream, then that's the same as not specifying a stream
+ * name.
+ *
+ *  F		    => fname=F sname=
+ *  F:		    => fname=F sname=
+ *  F::		    => fname=F sname=
+ *  F:S		    => fname=F sname=:S:$DATA
+ *  F:$DATA	    => fname=F sname=
+ *  F:S:	    => fname=F sname=:S:$DATA
+ *  F:S:$DATA	    => fname=F sname=:S:$DATA
+ *  F:$DATA:	    => fname=F sname=
+ *  F::T	    => fname=F sname=:$DATA:T
+ *  F::$DATA	    => fname=F sname=
+ *  F:S:T	    => fname=F sname=:S:T
+ *  F:$DATA:T	    => fname=F sname=:$DATA:T
+ *  F:$DATA:$DATA   => fname=F sname=
+ *
+ */
+NTSTATUS split_ntfs_stream_name(pstring fname, pstring stream)
+{
+	char *sname; /* stream name */
+	char *stype; /* stream type */
+
+	stream[0] = '\0';
+
+	if (lp_posix_pathnames()) {
+		return NT_STATUS_OK;
+	}
+
+	sname = strchr_m(fname, ':');
+	if (!sname) {
+		/* Not a stream. */
+		return NT_STATUS_OK;
+	}
+
+	/* Truncate fname at the stream name separator. */
+	*sname++ = '\0';
+
+	stype = strchr_m(sname, ':');
+	if (stype) {
+		/* Truncate sname at the stream type separator. */
+		*stype++ = '\0';
+	}
+
+	pstr_sprintf(stream, ":%s:%s",
+		(sname && *sname) ? sname : "$DATA",
+		(stype && *stype) ? stype : "$DATA");
+
+	if (StrCaseCmp(stream, ":$DATA:$DATA") == 0) {
+		*stream = '\0';
+	}
+	return NT_STATUS_OK;
+
 }
 
 /****************************************************************************
@@ -613,9 +673,20 @@ int reply_ntcreate_and_X(connection_struct *conn,
 		 * Check to see if this is a mac fork of some kind.
 		 */
 
-		if( is_ntfs_stream_name(fname)) {
-			enum FAKE_FILE_TYPE fake_file_type = is_fake_file(fname);
-			if (fake_file_type!=FAKE_FILE_TYPE_NONE) {
+		if (is_ntfs_stream_name(fname)) {
+			pstring path;
+			pstring stream;
+			enum FAKE_FILE_TYPE fake_file_type;
+
+			pstrcpy(path, fname);
+			status = split_ntfs_stream_name(path, stream);
+			if (!NT_STATUS_IS_OK(status)) {
+				END_PROFILE(SMBntcreateX);
+				return ERROR_NT(status);
+			}
+
+			fake_file_type = is_fake_file(path, stream);
+			if (fake_file_type == FAKE_FILE_TYPE_QUOTA) {
 				/*
 				 * Here we go! support for changing the disk quotas --metze
 				 *
@@ -629,7 +700,10 @@ int reply_ntcreate_and_X(connection_struct *conn,
 								fake_file_type, fname);
 				END_PROFILE(SMBntcreateX);
 				return result;
-			} else {
+			}
+
+			if (!lp_stream_support(SNUM(conn)) ||
+			    !(conn->fs_capabilities & FILE_NAMED_STREAMS)) {
 				END_PROFILE(SMBntcreateX);
 				return ERROR_NT(NT_STATUS_OBJECT_PATH_NOT_FOUND);
 			}
